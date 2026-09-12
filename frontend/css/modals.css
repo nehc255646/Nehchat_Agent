@@ -259,6 +259,10 @@
 #catalog-btn-slot {
   right: 362px;
 }
+
+#logout-btn-slot {
+  right: 484px;
+}
 .help-btn-top:hover {
   background: var(--accent-gradient);
   color: #fff;

@@ -38,6 +38,9 @@ import { initTheme, openThemeModal, closeThemeModal } from "./theme.js";
 // ── 自定义背景 ──
 import { initBackground, refreshBackgroundPanel } from "./background.js";
 
+// ── 账号 ──
+import { initAuth, bindAuthUi } from "./auth.js";
+
 // ── 初始化 ──
 
 async function init() {
@@ -273,7 +276,10 @@ function setupEventListeners() {
 
 // ── 启动 ──
 
-document.addEventListener("DOMContentLoaded", () => {
+document.addEventListener("DOMContentLoaded", async () => {
+  bindAuthUi();
+  const user = await initAuth();
+  if (!user) return; // 未登录：等待登录后刷新页面
   setupEventListeners();
   init();
 });

@@ -7,17 +7,20 @@ from __future__ import annotations
 
 from typing import Optional
 
+from accounts import AccountManager
 from clients import AIClient
 from session_manager import SlotManager
 
 _ai_client: Optional[AIClient] = None
 _slot_mgr: Optional[SlotManager] = None
+_account_mgr: Optional[AccountManager] = None
 
 
-def init(clients: AIClient, mgr: SlotManager) -> None:
-    global _ai_client, _slot_mgr
+def init(clients: AIClient, mgr: SlotManager, accounts: AccountManager) -> None:
+    global _ai_client, _slot_mgr, _account_mgr
     _ai_client = clients
     _slot_mgr = mgr
+    _account_mgr = accounts
 
 
 def get_ai_client() -> AIClient:
@@ -34,3 +37,11 @@ def get_slot_mgr() -> SlotManager:
             "SlotManager 尚未初始化 — 服务启动异常，请检查数据库连接和配置文件"
         )
     return _slot_mgr
+
+
+def get_auth_mgr() -> AccountManager:
+    if _account_mgr is None:
+        raise RuntimeError(
+            "AccountManager 尚未初始化 — 服务启动异常，请检查数据库连接和配置文件"
+        )
+    return _account_mgr

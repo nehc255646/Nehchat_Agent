@@ -16,9 +16,9 @@
 
 ---
 
-一个开箱即用的本地 AI 对话应用：在「模型配置」中自行添加任意 OpenAI 兼容供应商与模型，通过 10 个存档位管理多段独立对话。支持单模型直聊与双模型角色扮演（两模型依次回复、互相接力），对话全程 SSE 流式输出、落库 MySQL，并配备主题换肤、自定义背景图、Markdown 渲染与完整备份恢复。
+一个开箱即用的 AI 对话应用：在「模型配置」中自行添加任意 OpenAI 兼容供应商与模型，通过 10 个存档位管理多段独立对话。支持单模型直聊与双模型角色扮演（两模型依次回复、互相接力），对话全程 SSE 流式输出、落库 MySQL，并配备多用户账号（数据按用户隔离）、主题换肤、自定义背景图、Markdown 渲染与完整备份恢复。
 
-前端 Vite + 原生 JS，后端 FastAPI + MySQL，一键脚本启动，无需任何账号与鉴权配置（仅限本地使用）。
+前端 Vite + 原生 JS，后端 FastAPI + MySQL，一键脚本启动；内置账号登录与数据隔离，可通过邀请码开放注册，公网隧道访问还可叠加 Basic Auth 外层门禁。
 
 ## 目录
 
@@ -37,6 +37,14 @@
 - [安全须知与许可](#-安全须知与许可)
 
 ## ✨ 功能特性
+
+### 👥 多用户与账号
+
+- **首次初始化**：首次打开页面创建管理员账号（仅限本机完成），已有数据自动归入该账号
+- **邀请码注册**：`.env` 设置 `INVITE_CODE` 后开放注册，未设置则仅已有账号可用
+- **数据隔离**：存档、消息、供应商与模型目录全部按用户隔离，互不可见
+- **安全存储**：密码使用 scrypt 加盐哈希；HttpOnly Cookie 会话（30 天），支持注销
+- **可选外层门禁**：公网隧道场景可再设置 `WEB_USER` / `WEB_PASSWORD` 叠加 HTTP Basic Auth
 
 ### 🗂️ 存档系统
 
@@ -111,6 +119,7 @@
 1. **配置数据库连接**：在项目根目录创建 `.env`（参考下文[配置项](#️-配置项)），`MYSQL_PASSWORD` 必填
 2. **首次运行 / 依赖变化后**：双击 `重置启动.bat` —— 安装后端依赖、构建前端、以 `--reload` 启动服务并打开浏览器
 3. **日常启动**：双击 `快速启动.bat` —— 检测 8000 端口占用，直接启动后端并自动打开浏览器
+4. **首次访问**：页面会要求创建管理员账号（仅本机可完成），历史数据自动归入该账号；如需邀请朋友注册，在 `.env` 设置 `INVITE_CODE`
 
 > 数据库 `ai_chat` 与全部数据表（slots / messages / providers / catalog_models）在服务首次启动时**自动创建**，含旧表结构自动迁移，无需手动执行 SQL。
 
@@ -121,6 +130,10 @@ cd backend
 python -m uvicorn main:app --host 127.0.0.1 --port 8000
 # 访问 http://localhost:8000
 ```
+
+### 公网访问（可选）
+
+双击 `公网隧道.bat`：自动启动后端并通过 Cloudflare 快速隧道（cloudflared）生成 `https://*.trycloudflare.com` 公网地址；服务仍在本机运行，关闭窗口即断。所有数据默认需要账号登录，如需额外一层门禁可在 `.env` 中设置 `WEB_USER` / `WEB_PASSWORD` 叠加 Basic Auth。
 
 ## ⚙️ 配置项
 
@@ -134,6 +147,9 @@ python -m uvicorn main:app --host 127.0.0.1 --port 8000
 | `MYSQL_PASSWORD` | **是** | — | 未设置时服务拒绝启动 |
 | `MYSQL_DATABASE` | 否 | `ai_chat` | 库名（不存在自动创建） |
 | `ALLOWED_ORIGINS` | 否 | `http://localhost:5173,...` | CORS 白名单，逗号分隔 |
+| `INVITE_CODE` | 否 | — | 注册邀请码；设置后开放注册，不设置则仅已有账号可用 |
+| `WEB_USER` | 否 | — | 可选的 Basic Auth 外层门禁用户名（与内置账号登录叠加） |
+| `WEB_PASSWORD` | 否 | — | 可选的 Basic Auth 外层门禁密码 |
 | `UVICORN_HOST` | 否 | `127.0.0.1` | 监听地址（`python main.py` 时生效） |
 | `UVICORN_RELOAD` | 否 | `0` | 热重载开关（`python main.py` 时生效） |
 
@@ -185,11 +201,14 @@ AI_project/
 │  ├─ main.py             # FastAPI 入口：lifespan 初始化、注册路由、托管前端
 │  ├─ config.py           # MySQL / 槽位 / 上下文窗口 / 背景图 / 默认参数
 │  ├─ clients.py          # AIClient：流式调用、hello 测试、重试与错误映射
+│  ├─ auth.py             # 可选 Basic Auth 中间件 + 登录会话依赖（current_user）
+│  ├─ accounts.py         # 账号与会话：scrypt 密码哈希、注册/登录、旧数据接管
 │  ├─ helpers.py          # error / resolve_slot / get_runtime / 密钥解析
 │  ├─ models.py           # Pydantic 请求/响应模型
 │  ├─ session_manager.py  # SlotManager：建库建表、CRUD、目录、锁与事务
 │  ├─ state.py            # 全局单例
 │  ├─ routes/
+│  │  ├─ auth.py          # 初始化 / 邀请码注册 / 登录注销 / 当前用户
 │  │  ├─ slots.py         # 存档 CRUD、消息操作、配置更新、备份导入导出
 │  │  ├─ chat.py          # /api/chat 与 continue 的 SSE 流（单/双模型）
 │  │  ├─ models.py        # 模型列表 / env-check / 默认参数
@@ -203,6 +222,7 @@ AI_project/
 │  │  ├─ api.js           # apiFetch：指数退避（4xx 不重试）
 │  │  ├─ state.js         # 全局状态
 │  │  ├─ chat.js          # SSE 解析、发送/继续/取消/重发/编辑
+│  │  ├─ auth.js          # 登录 / 注册 / 首次初始化视图与 401 处理
 │  │  ├─ catalog.js       # 模型配置弹层（供应商/模型增删改测）
 │  │  ├─ modals.js        # 6 步创建向导 + 编辑复用
 │  │  ├─ theme.js         # 主题与明暗模式
@@ -212,12 +232,24 @@ AI_project/
 │  └─ vite.config.js      # dev 5173 代理 /api 与 /backgrounds → 8000
 ├─ 快速启动.bat            # 日常启动：端口检测 + 起服务 + 开浏览器
 ├─ 重置启动.bat            # 装依赖 + 构建前端 + --reload 启动
+├─ 公网隧道.bat            # 公网隧道：cloudflared + 后端 + 鉴权检测
 └─ .env                   # 本地环境变量（已被 .gitignore 忽略）
 ```
 
 ## 🔌 API 一览
 
-统一错误格式 `{code, message, detail}`，前端映射为中文 Toast / 内联卡片。
+统一错误格式 `{code, message, detail}`，前端映射为中文 Toast / 内联卡片。除 `/api/auth/*` 与 `GET /api/auth/status` 外，所有 `/api` 接口均需登录（Cookie 会话）。
+
+### 账号
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| `GET` | `/api/auth/status` | 是否已初始化 / 是否开放注册（无需登录） |
+| `POST` | `/api/auth/setup` | 首次初始化管理员（仅限本机，自动接管旧数据） |
+| `POST` | `/api/auth/register` | 邀请码注册 |
+| `POST` | `/api/auth/login` | 登录（写入会话 Cookie） |
+| `POST` | `/api/auth/logout` | 注销当前会话 |
+| `GET` | `/api/auth/me` | 当前登录用户 |
 
 ### 存档与消息
 
@@ -309,8 +341,8 @@ npm run build
 
 ## 🔒 安全须知与许可
 
-- 项目**无任何鉴权**，服务只监听 `127.0.0.1`，请勿将端口暴露到公网
-- API 密钥明文存储于 MySQL（或经环境变量注入），请自行做好机器安全
+- 项目**内置账号登录与数据隔离**，服务默认只监听 `127.0.0.1`；公网暴露时建议再设置 `WEB_USER` / `WEB_PASSWORD` 叠加一层 Basic Auth 门禁
+- 密码以 scrypt 加盐哈希存储；API 密钥明文存储于 MySQL（或经环境变量注入），请自行做好机器安全
 - 未声明开源许可证，仅供本地个人使用
 
 ---

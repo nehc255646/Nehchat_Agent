@@ -1,5 +1,5 @@
 """
-背景图路由 — 自定义全局背景的上传、列表与删除。
+背景图路由 — 自定义全局背景的上传、列表与删除（所有用户共享背景库）。
 
 图片存放于 backend/backgrounds/ 目录，可手动放入文件，
 也可通过 POST /api/backgrounds 上传；统一由 /backgrounds 静态挂载访问。
@@ -11,8 +11,9 @@ import time
 import logging
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 
+from auth import current_user
 from config import (
     BACKGROUNDS_DIR,
     BACKGROUND_ALLOWED_EXTS,
@@ -49,7 +50,7 @@ def _resolve_safe(name: str) -> Path:
 
 
 @router.get("")
-def list_backgrounds():
+def list_backgrounds(user: dict = Depends(current_user)):
     """返回 backgrounds 目录下全部图片 [{name, url}]。"""
     _ensure_dir()
     items = []
@@ -68,7 +69,7 @@ def list_backgrounds():
 
 
 @router.post("")
-async def upload_background(file: UploadFile = File(...)):
+async def upload_background(file: UploadFile = File(...), user: dict = Depends(current_user)):
     """上传一张图片到 backgrounds 目录。"""
     _ensure_dir()
 
@@ -118,7 +119,7 @@ async def upload_background(file: UploadFile = File(...)):
 
 
 @router.delete("/{name:path}")
-def delete_background(name: str):
+def delete_background(name: str, user: dict = Depends(current_user)):
     """删除指定背景图。"""
     path = _resolve_safe(name)
     if not path.is_file():

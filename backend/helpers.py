@@ -23,11 +23,11 @@ def error(code: str, message: str, status: int = 400, detail: str = "") -> None:
     )
 
 
-def resolve_slot(slot_index: int) -> dict:
-    """校验存档位是否存在并返回其数据。"""
+def resolve_slot(user_id: int, slot_index: int) -> dict:
+    """校验存档位是否存在并返回其数据（限定当前用户）。"""
     if slot_index < 0 or slot_index >= SLOT_COUNT:
         error("invalid_slot", f"存档位 {slot_index} 无效（0-{SLOT_COUNT - 1}）", 400)
-    data = get_slot_mgr().get_slot(slot_index)
+    data = get_slot_mgr().get_slot(user_id, slot_index)
     if data is None:
         error("slot_not_found", f"存档 #{slot_index + 1} 不存在", 404)
     return data
@@ -100,9 +100,9 @@ def resolve_secret(row: dict) -> str:
     return key or DUMMY_API_KEY
 
 
-def validate_model_key(model_key: str) -> dict:
-    """验证模型存在于目录中，返回解析后的配置。"""
-    cfg = get_slot_mgr().resolve_model_key(model_key)
+def validate_model_key(user_id: int, model_key: str) -> dict:
+    """验证模型存在于当前用户的目录中，返回解析后的配置。"""
+    cfg = get_slot_mgr().resolve_model_key(user_id, model_key)
     if not cfg:
         error("unknown_model", f"模型不存在或已从目录删除: {model_key}", 400)
     return {
@@ -117,11 +117,11 @@ def validate_model_key(model_key: str) -> dict:
     }
 
 
-def get_runtime(model_key: str, *, http: bool = True) -> dict:
-    """解析对话 / 测试用的运行时配置。"""
+def get_runtime(user_id: int, model_key: str, *, http: bool = True) -> dict:
+    """解析对话 / 测试用的运行时配置（限定当前用户的模型目录）。"""
     from clients import AIClientError
 
-    row = get_slot_mgr().resolve_model_key(model_key)
+    row = get_slot_mgr().resolve_model_key(user_id, model_key)
     if not row:
         msg = f"模型不存在或已从目录删除: {model_key}"
         if http:

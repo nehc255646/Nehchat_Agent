@@ -36,3 +36,7 @@ Thumbs.db
 
 # 构建产物
 frontend/dist/
+
+# 公网隧道二进制（由 公网隧道.bat 自动下载）
+cloudflared.exe
+cloudflared-*.exe

@@ -3,6 +3,7 @@
  */
 
 export const state = {
+  user: null,              // 当前登录用户 {id, username}
   view: "slots",           // "slots" | "chat"
   slots: [],
   currentSlotIndex: null,

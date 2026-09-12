@@ -11,9 +11,10 @@ import asyncio
 import re
 from typing import AsyncGenerator
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 
+from auth import current_user
 from config import CONTEXT_WINDOW_SIZE, CONTEXT_MAX_CHARS
 from helpers import resolve_slot, error, get_runtime
 from models import ChatRequest
@@ -22,24 +23,25 @@ from state import get_ai_client, get_slot_mgr
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["chat"])
-_slot_locks: dict[int, asyncio.Lock] = {}
+_slot_locks: dict[tuple[int, int], asyncio.Lock] = {}
 
 
-def _slot_lock(slot_index: int) -> asyncio.Lock:
-    if slot_index not in _slot_locks:
-        _slot_locks[slot_index] = asyncio.Lock()
-    return _slot_locks[slot_index]
+def _slot_lock(user_id: int, slot_index: int) -> asyncio.Lock:
+    key = (user_id, slot_index)
+    if key not in _slot_locks:
+        _slot_locks[key] = asyncio.Lock()
+    return _slot_locks[key]
 
 
 async def _db_call(method, *args):
     return await asyncio.to_thread(method, *args)
 
 
-async def _locked_stream(slot_index: int, source):
-    async with _slot_lock(slot_index):
+async def _locked_stream(user_id: int, slot_index: int, source):
+    async with _slot_lock(user_id, slot_index):
         lock_conn = None
         try:
-            lock_conn = await _db_call(get_slot_mgr().acquire_slot_lock, slot_index)
+            lock_conn = await _db_call(get_slot_mgr().acquire_slot_lock, user_id, slot_index)
             if lock_conn is None:
                 yield _sse({
                     "type": "error",
@@ -51,7 +53,7 @@ async def _locked_stream(slot_index: int, source):
                 yield event
         finally:
             if lock_conn is not None:
-                await _db_call(get_slot_mgr().release_slot_lock, lock_conn, slot_index)
+                await _db_call(get_slot_mgr().release_slot_lock, lock_conn, user_id, slot_index)
 
 # ── 固定图标 ──
 MODEL1_ICON = "🎭"
@@ -153,6 +155,7 @@ def _auto_title(slot_index: int, text: str) -> str:
 
 
 async def _stream_dual_turn(
+    user_id: int,
     slot_index: int,
     data: dict,
     history: list,
@@ -191,7 +194,7 @@ async def _stream_dual_turn(
     try:
         # 用户消息：仅普通发消息时落库并作为回滚起点
         if persist_user:
-            saved_ids = await _db_call(get_slot_mgr().append_messages, slot_index, [
+            saved_ids = await _db_call(get_slot_mgr().append_messages, user_id, slot_index, [
                 {"role": "user", "content": user_content},
             ])
             if not saved_ids:
@@ -237,7 +240,7 @@ async def _stream_dual_turn(
                 role_name = model2_name
                 role_icon = MODEL2_ICON
 
-            rt = get_runtime(cfg_key, http=False)
+            rt = get_runtime(user_id, cfg_key, http=False)
             max_tokens = rt.get("max_tokens")
 
             # ── 构建消息上下文 ──
@@ -295,7 +298,7 @@ async def _stream_dual_turn(
             full_response = "".join(chunks)
 
             # 保存到数据库
-            saved = await _db_call(get_slot_mgr().append_messages, slot_index, [
+            saved = await _db_call(get_slot_mgr().append_messages, user_id, slot_index, [
                 {"role": "assistant", "content": full_response, "source": role},
             ])
             if not saved:
@@ -325,7 +328,7 @@ async def _stream_dual_turn(
         if persist_user and not data.get("title", ""):
             if not await _db_call(
                 get_slot_mgr().update_slot_meta,
-                slot_index, {"title": _auto_title(slot_index, user_content)}
+                user_id, slot_index, {"title": _auto_title(slot_index, user_content)}
             ):
                 logger.warning(f"自动更新存档 #{slot_index + 1} 标题失败")
 
@@ -357,6 +360,7 @@ async def _stream_dual_turn(
             try:
                 await _db_call(
                     get_slot_mgr().delete_messages_from,
+                    user_id,
                     slot_index,
                     rollback_start_id,
                 )
@@ -368,13 +372,14 @@ async def _stream_dual_turn(
 
 
 @router.post("/api/chat")
-async def chat(req: ChatRequest):
+async def chat(req: ChatRequest, user: dict = Depends(current_user)):
     """流式对话 — 接收 JSON，返回 SSE 流式响应。"""
+    uid = user["id"]
     user_content = (req.message or "").strip()
     if not user_content and not req.from_id:
         error("empty_message", "消息不能为空", 400)
 
-    data = await _db_call(resolve_slot, req.slot_index)
+    data = await _db_call(resolve_slot, uid, req.slot_index)
 
     history: list = data.get("history", [])
     system_prompt: str = data.get("system_prompt", "使用中文回答")
@@ -413,7 +418,7 @@ async def chat(req: ChatRequest):
 
         try:
             # 锁内重新读取，避免删/写之间用到过期历史
-            fresh = await _db_call(resolve_slot, req.slot_index)
+            fresh = await _db_call(resolve_slot, uid, req.slot_index)
             local_history = list(fresh.get("history") or [])
 
             if req.from_id:
@@ -439,12 +444,12 @@ async def chat(req: ChatRequest):
                 if local_content != (target.get("content") or ""):
                     updated = await _db_call(
                         get_slot_mgr().update_message_content,
-                        req.slot_index, req.from_id, local_content,
+                        uid, req.slot_index, req.from_id, local_content,
                     )
                     if not updated:
                         raise RuntimeError("更新用户消息失败")
                 if not await _db_call(
-                    get_slot_mgr().delete_messages_after, req.slot_index, req.from_id,
+                    get_slot_mgr().delete_messages_after, uid, req.slot_index, req.from_id,
                 ):
                     raise RuntimeError("删除后续消息失败")
                 local_history = [
@@ -466,7 +471,7 @@ async def chat(req: ChatRequest):
                 actual_prompt = system_prompt
                 actual_params = params
 
-                rt = get_runtime(actual_model, http=False)
+                rt = get_runtime(uid, actual_model, http=False)
                 max_tokens = rt.get("max_tokens")
 
                 context_history = _truncate_history(local_history)
@@ -474,7 +479,7 @@ async def chat(req: ChatRequest):
 
                 chunks = []
                 if persist_user:
-                    saved_ids = await _db_call(get_slot_mgr().append_messages, req.slot_index, [
+                    saved_ids = await _db_call(get_slot_mgr().append_messages, uid, req.slot_index, [
                         {"role": "user", "content": local_content},
                     ])
                     if not saved_ids:
@@ -495,7 +500,7 @@ async def chat(req: ChatRequest):
                     yield _sse({'type': 'chunk', 'content': chunk})
 
                 full_response = "".join(chunks)
-                msg_ids = await _db_call(get_slot_mgr().append_messages, req.slot_index, [
+                msg_ids = await _db_call(get_slot_mgr().append_messages, uid, req.slot_index, [
                     {"role": "assistant", "content": full_response, "source": "single"},
                 ])
                 if not msg_ids:
@@ -505,7 +510,7 @@ async def chat(req: ChatRequest):
                 if persist_user and not fresh.get("title", ""):
                     if not await _db_call(
                         get_slot_mgr().update_slot_meta,
-                        req.slot_index, {"title": _auto_title(req.slot_index, local_content)}
+                        uid, req.slot_index, {"title": _auto_title(req.slot_index, local_content)}
                     ):
                         logger.warning(f"自动更新存档 #{req.slot_index + 1} 标题失败")
 
@@ -520,7 +525,7 @@ async def chat(req: ChatRequest):
 
             # ── 双模型模式（共享助手：自行落库、发事件、处理错误与回滚） ──
             gen = _stream_dual_turn(
-                req.slot_index, fresh, local_history, local_content,
+                uid, req.slot_index, fresh, local_history, local_content,
                 persist_user=persist_user,
                 inject_user=inject_user,
                 existing_user_id=user_msg_id,
@@ -553,6 +558,7 @@ async def chat(req: ChatRequest):
                 try:
                     await _db_call(
                         get_slot_mgr().delete_messages_from,
+                        uid,
                         req.slot_index,
                         rollback_start_id,
                     )
@@ -563,21 +569,22 @@ async def chat(req: ChatRequest):
                     logger.warning(f"回滚失败: {e}")
 
     return StreamingResponse(
-        _locked_stream(req.slot_index, stream()),
+        _locked_stream(uid, req.slot_index, stream()),
         media_type="text/event-stream",
         headers=_SSE_HEADERS,
     )
 
 
 @router.post("/api/slots/{slot_index}/chat/continue")
-async def continue_chat(slot_index: int):
+async def continue_chat(slot_index: int, user: dict = Depends(current_user)):
     """继续回复。
 
     单模型：不新增用户消息，让最后一条 AI 回复继续生成（合并回原消息）。
     双模型：相当于用户留空，两个模型按 response_mode / first_model / pass_mode
     正常回复一轮（各新增一条回复，不落库用户消息）。
     """
-    data = await _db_call(resolve_slot, slot_index)
+    uid = user["id"]
+    data = await _db_call(resolve_slot, uid, slot_index)
     history: list = data.get("history", [])
     dual_config = data.get("dual_config", {}) or {}
 
@@ -591,7 +598,7 @@ async def continue_chat(slot_index: int):
     if dual_config.get("enabled", False):
         async def stream():
             gen = _stream_dual_turn(
-                slot_index, data, history, DUAL_CONTINUE_PROMPT,
+                uid, slot_index, data, history, DUAL_CONTINUE_PROMPT,
                 persist_user=False, error_ref_key="message_id",
             )
             try:
@@ -601,7 +608,7 @@ async def continue_chat(slot_index: int):
                 await gen.aclose()
 
         return StreamingResponse(
-            _locked_stream(slot_index, stream()),
+            _locked_stream(uid, slot_index, stream()),
             media_type="text/event-stream",
             headers=_SSE_HEADERS,
         )
@@ -622,7 +629,7 @@ async def continue_chat(slot_index: int):
     cfg_system = data.get("system_prompt") or "使用中文回答"
     cfg_params = data.get("params") or {}
 
-    rt = get_runtime(cfg_key, http=True)
+    rt = get_runtime(uid, cfg_key, http=True)
     max_tokens = rt.get("max_tokens")
 
     # 上下文：历史（截断到窗口，含最后一条 assistant）+ 继续指令（仅本次请求，不入库）
@@ -658,11 +665,11 @@ async def continue_chat(slot_index: int):
             if full_response and message_id:
                 updated = await _db_call(
                     get_slot_mgr().update_message_content,
-                    slot_index, message_id, original_content + full_response
+                    uid, slot_index, message_id, original_content + full_response
                 )
                 if not updated:
                     raise RuntimeError("数据库更新模型回复失败")
-                if not await _db_call(get_slot_mgr().touch_slot, slot_index):
+                if not await _db_call(get_slot_mgr().touch_slot, uid, slot_index):
                     logger.warning(f"刷新存档 #{slot_index + 1} 时间失败")
 
             yield _sse({
@@ -680,7 +687,7 @@ async def continue_chat(slot_index: int):
             yield _sse(_exception_error_event(e, "message_id", message_id))
 
     return StreamingResponse(
-        _locked_stream(slot_index, stream()),
+        _locked_stream(uid, slot_index, stream()),
         media_type="text/event-stream",
         headers=_SSE_HEADERS,
     )

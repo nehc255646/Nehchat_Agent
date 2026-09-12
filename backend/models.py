@@ -10,6 +10,22 @@ from pydantic import BaseModel, Field
 # ── 请求模型 ──
 
 
+class SetupRequest(BaseModel):
+    """首次初始化管理员账号。"""
+    username: str = Field(min_length=1, max_length=32)
+    password: str = Field(min_length=1, max_length=128)
+
+
+class RegisterRequest(SetupRequest):
+    """邀请码注册。"""
+    invite_code: str = Field(default="", max_length=128)
+
+
+class LoginRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=32)
+    password: str = Field(min_length=1, max_length=128)
+
+
 class ChatRequest(BaseModel):
     slot_index: int
     message: str = Field(default="", max_length=200_000)

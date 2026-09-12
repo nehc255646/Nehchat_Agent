@@ -1,13 +1,14 @@
 """
-存档路由 — 对话存档的增删改查接口。
+存档路由 — 对话存档的增删改查接口（按登录用户隔离）。
 """
 from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 
+from auth import current_user
 from config import SLOT_COUNT
 from models import (
     CreateSlotRequest,
@@ -37,19 +38,20 @@ class TitleUpdateRequest(BaseModel):
 
 
 @router.get("/api/slots")
-def list_slots():
-    return get_slot_mgr().list_slots()
+def list_slots(user: dict = Depends(current_user)):
+    return get_slot_mgr().list_slots(user["id"])
 
 
 @router.post("/api/slots/{slot_index}")
-def create_slot(slot_index: int, req: CreateSlotRequest):
+def create_slot(slot_index: int, req: CreateSlotRequest, user: dict = Depends(current_user)):
+    uid = user["id"]
     if slot_index < 0 or slot_index >= SLOT_COUNT:
         error("invalid_slot", f"无效的存档位: {slot_index}", 400)
 
-    if get_slot_mgr().get_slot(slot_index) is not None:
+    if get_slot_mgr().get_slot(uid, slot_index) is not None:
         error("slot_in_use", f"存档位 #{slot_index + 1} 已被使用", 409)
 
-    validate_model_key(req.model)
+    validate_model_key(uid, req.model)
 
     # 构建 dual_config
     dual_config = None
@@ -57,7 +59,7 @@ def create_slot(slot_index: int, req: CreateSlotRequest):
         m2 = req.model2
         if not m2:
             error("missing_model2", "双模型配置缺少模型 2", 400)
-        validate_model_key(m2.model)
+        validate_model_key(uid, m2.model)
         dual_config = {
             "enabled": True,
             "response_mode": "both",
@@ -73,7 +75,7 @@ def create_slot(slot_index: int, req: CreateSlotRequest):
         }
 
     success = get_slot_mgr().create_slot(
-        slot_index, req.model, req.system_prompt, "",
+        uid, slot_index, req.model, req.system_prompt, "",
         req.params.model_dump() if req.params else None, req.title,
         dual_config=dual_config,
     )
@@ -83,15 +85,15 @@ def create_slot(slot_index: int, req: CreateSlotRequest):
 
 
 @router.delete("/api/slots/{slot_index}")
-def delete_slot(slot_index: int):
-    if not get_slot_mgr().delete_slot(slot_index):
+def delete_slot(slot_index: int, user: dict = Depends(current_user)):
+    if not get_slot_mgr().delete_slot(user["id"], slot_index):
         error("slot_not_found", "存档不存在", 404)
     return {"ok": True}
 
 
 @router.get("/api/slots/{slot_index}/chat")
-def get_slot_chat(slot_index: int):
-    data = resolve_slot(slot_index)
+def get_slot_chat(slot_index: int, user: dict = Depends(current_user)):
+    data = resolve_slot(user["id"], slot_index)
     dual_config = data.get("dual_config", {}) or {}
     return SlotDetail(
         index=slot_index,
@@ -110,34 +112,36 @@ def get_slot_chat(slot_index: int):
 
 
 @router.post("/api/slots/{slot_index}/chat/clear")
-def clear_slot_chat(slot_index: int):
-    resolve_slot(slot_index)  # 校验存档存在
+def clear_slot_chat(slot_index: int, user: dict = Depends(current_user)):
+    uid = user["id"]
+    resolve_slot(uid, slot_index)  # 校验存档存在
     mgr = get_slot_mgr()
-    if not mgr.clear_all_messages(slot_index):
+    if not mgr.clear_all_messages(uid, slot_index):
         error("clear_failed", "清空对话失败", 500)
     return {"ok": True}
 
 
 @router.delete("/api/slots/{slot_index}/chat/messages")
-def delete_messages(slot_index: int, req: DeleteMessageRequest):
+def delete_messages(slot_index: int, req: DeleteMessageRequest, user: dict = Depends(current_user)):
     """删除消息。
 
     优先使用 from_id（按消息 ID 删除），
     回退到 from_index / to_index（按数组下标删除）。
     """
+    uid = user["id"]
     mgr = get_slot_mgr()
-    resolve_slot(slot_index)
+    resolve_slot(uid, slot_index)
 
     if req.from_id is not None:
         if req.from_id <= 0:
             error("invalid_message_id", "消息 ID 无效", 400)
-        success = mgr.delete_messages_from(slot_index, req.from_id)
+        success = mgr.delete_messages_from(uid, slot_index, req.from_id)
         if not success:
             error("delete_failed", "删除消息失败", 500)
         return {"ok": True}
 
     # 按数组下标删除（通过消息 ID 精确定位，不影响其余消息 ID）
-    data = resolve_slot(slot_index)
+    data = resolve_slot(uid, slot_index)
     history: list = data.get("history", [])
     total = len(history)
 
@@ -155,16 +159,17 @@ def delete_messages(slot_index: int, req: DeleteMessageRequest):
     ]
     if not ids_to_delete:
         error("delete_failed", "无法定位要删除的消息", 500)
-    if not mgr.delete_messages_by_ids(slot_index, ids_to_delete):
+    if not mgr.delete_messages_by_ids(uid, slot_index, ids_to_delete):
         error("delete_failed", "删除消息失败", 500)
     return {"ok": True, "deleted": len(ids_to_delete)}
 
 
 @router.patch("/api/slots/{slot_index}/chat/messages")
-def edit_message(slot_index: int, req: EditMessageRequest):
+def edit_message(slot_index: int, req: EditMessageRequest, user: dict = Depends(current_user)):
     """编辑消息。优先使用 message_id 定位。"""
+    uid = user["id"]
     mgr = get_slot_mgr()
-    resolve_slot(slot_index)
+    resolve_slot(uid, slot_index)
 
     if not req.content:
         error("empty_content", "消息内容不能为空", 400)
@@ -172,40 +177,41 @@ def edit_message(slot_index: int, req: EditMessageRequest):
     if req.message_id is not None:
         if req.message_id <= 0:
             error("invalid_message_id", "消息 ID 无效", 400)
-        success = mgr.update_message_content(slot_index, req.message_id, req.content)
+        success = mgr.update_message_content(uid, slot_index, req.message_id, req.content)
         if not success:
             error("message_not_found", f"消息 #{req.message_id} 不存在", 404)
         return {"ok": True}
 
     # 按下标编辑（通过消息 ID 更新，保持其余消息 ID 不变）
-    data = resolve_slot(slot_index)
+    data = resolve_slot(uid, slot_index)
     history: list = data.get("history", [])
     if req.index is None or req.index < 0 or req.index >= len(history):
         error("invalid_index", f"消息索引 {req.index} 无效", 400)
     target = history[req.index]
     if not target.get("id"):
         error("message_not_found", "无法定位消息 ID", 404)
-    if not mgr.update_message_content(slot_index, target["id"], req.content):
+    if not mgr.update_message_content(uid, slot_index, target["id"], req.content):
         error("message_not_found", f"消息 #{target['id']} 不存在", 404)
     return {"ok": True}
 
 
 @router.patch("/api/slots/{slot_index}/title")
-def update_slot_title(slot_index: int, req: TitleUpdateRequest):
+def update_slot_title(slot_index: int, req: TitleUpdateRequest, user: dict = Depends(current_user)):
     """更新存档标题。"""
-    resolve_slot(slot_index)
+    uid = user["id"]
+    resolve_slot(uid, slot_index)
     title = req.title.strip()
     if not title:
         error("empty_title", "标题不能为空", 400)
-    if not get_slot_mgr().update_slot_meta(slot_index, {"title": title}):
+    if not get_slot_mgr().update_slot_meta(uid, slot_index, {"title": title}):
         error("update_failed", "标题更新失败", 500)
     return {"ok": True}
 
 
 @router.patch("/api/slots/{slot_index}/api-key")
-def update_slot_api_key(slot_index: int, req: ApiKeyUpdateRequest):
+def update_slot_api_key(slot_index: int, req: ApiKeyUpdateRequest, user: dict = Depends(current_user)):
     """已废弃：密钥改在「模型配置」中按供应商管理。"""
-    resolve_slot(slot_index)
+    resolve_slot(user["id"], slot_index)
     error(
         "gone",
         "密钥已改为在「模型配置」中按供应商管理，请到右上角打开模型配置",
@@ -214,9 +220,10 @@ def update_slot_api_key(slot_index: int, req: ApiKeyUpdateRequest):
 
 
 @router.patch("/api/slots/{slot_index}/dual-toggle")
-def toggle_dual_mode(slot_index: int, req: DualToggleRequest):
+def toggle_dual_mode(slot_index: int, req: DualToggleRequest, user: dict = Depends(current_user)):
     """切换双模型的回复模式。"""
-    data = resolve_slot(slot_index)
+    uid = user["id"]
+    data = resolve_slot(uid, slot_index)
     dual_config = data.get("dual_config", {}) or {}
     if not dual_config.get("enabled"):
         error("not_dual_mode", "该存档不是双模型模式", 400)
@@ -228,13 +235,13 @@ def toggle_dual_mode(slot_index: int, req: DualToggleRequest):
 
     dual_config["response_mode"] = req.response_mode
     dual_config["first_model"] = req.first_model
-    if not get_slot_mgr().update_dual_config(slot_index, dual_config):
+    if not get_slot_mgr().update_dual_config(uid, slot_index, dual_config):
         error("update_failed", "回复模式更新失败", 500)
     return {"ok": True, "dual_config": dual_config}
 
 
 @router.patch("/api/slots/{slot_index}/config")
-def update_slot_config(slot_index: int, req: UpdateSlotRequest):
+def update_slot_config(slot_index: int, req: UpdateSlotRequest, user: dict = Depends(current_user)):
     """模型更换 — 原子更新存档的模型/提示词/参数/密钥等配置（不影响历史消息）。
 
     单模型与双模型的两个模型完全独立：
@@ -242,9 +249,9 @@ def update_slot_config(slot_index: int, req: UpdateSlotRequest):
     - `model2` 嵌套对象仅作用于模型2，切勿交叉覆盖
     """
     import copy
-    import json as _json
 
-    data = resolve_slot(slot_index)
+    uid = user["id"]
+    data = resolve_slot(uid, slot_index)
     mgr = get_slot_mgr()
     dual_raw = data.get("dual_config", {}) or {}
     is_dual = dual_raw.get("enabled", False)
@@ -285,7 +292,7 @@ def update_slot_config(slot_index: int, req: UpdateSlotRequest):
     # ——— 模型1（或单模型） ———
     # model
     if req.model is not None:
-        validate_model_key(req.model)
+        validate_model_key(uid, req.model)
         new_model = req.model
 
     # system_prompt
@@ -326,7 +333,7 @@ def update_slot_config(slot_index: int, req: UpdateSlotRequest):
             m2 = req.model2
             # model
             if m2.model is not None:
-                validate_model_key(m2.model)
+                validate_model_key(uid, m2.model)
                 new_dual["model2"]["model"] = m2.model
             # system_prompt
             if m2.system_prompt is not None:
@@ -341,6 +348,7 @@ def update_slot_config(slot_index: int, req: UpdateSlotRequest):
 
     # 执行原子更新
     success = mgr.update_slot(
+        uid,
         slot_index,
         model=new_model,
         system_prompt=new_prompt,
@@ -352,7 +360,7 @@ def update_slot_config(slot_index: int, req: UpdateSlotRequest):
         error("update_failed", "更新存档配置失败", 500)
 
     # 返回最新配置供前端同步
-    fresh = mgr.get_slot(slot_index)
+    fresh = mgr.get_slot(uid, slot_index)
     if fresh is None:
         error("slot_not_found", "存档不存在", 404)
     fresh_dual = fresh.get("dual_config", {}) or {}
@@ -368,8 +376,8 @@ def update_slot_config(slot_index: int, req: UpdateSlotRequest):
 
 
 @router.get("/api/slots/{slot_index}/chat/export")
-def export_chat(slot_index: int):
-    data = resolve_slot(slot_index)
+def export_chat(slot_index: int, user: dict = Depends(current_user)):
+    data = resolve_slot(user["id"], slot_index)
     return ExportData(
         title=data.get("title", "未命名对话"),
         model=data.get("model", ""),
@@ -381,9 +389,9 @@ def export_chat(slot_index: int):
 
 
 @router.get("/api/slots/{slot_index}/backup")
-def export_backup(slot_index: int):
+def export_backup(slot_index: int, user: dict = Depends(current_user)):
     """导出可完整恢复存档的 JSON 备份。"""
-    data = resolve_slot(slot_index)
+    data = resolve_slot(user["id"], slot_index)
     return {
         "version": 2,
         "index": slot_index,
@@ -398,24 +406,25 @@ def export_backup(slot_index: int):
 
 
 @router.post("/api/slots/{slot_index}/backup")
-def import_backup(slot_index: int, req: ImportSlotRequest):
+def import_backup(slot_index: int, req: ImportSlotRequest, user: dict = Depends(current_user)):
     """将 JSON 备份导入空存档位。"""
+    uid = user["id"]
     if slot_index < 0 or slot_index >= SLOT_COUNT:
         error("invalid_slot", f"无效的存档位: {slot_index}", 400)
     mgr = get_slot_mgr()
-    if mgr.get_slot(slot_index) is not None:
+    if mgr.get_slot(uid, slot_index) is not None:
         error("slot_in_use", f"存档位 #{slot_index + 1} 已被使用", 409)
 
-    validate_model_key(req.model)
+    validate_model_key(uid, req.model)
     dual_config = req.dual_config.model_dump() if req.dual_config else {}
     if dual_config.get("enabled"):
         model2 = dual_config.get("model2") or {}
-        validate_model_key(model2.get("model", ""))
+        validate_model_key(uid, model2.get("model", ""))
         if isinstance(dual_config.get("model2"), dict):
             dual_config["model2"]["api_key"] = ""
 
     if not mgr.create_slot(
-        slot_index, req.model, req.system_prompt, "",
+        uid, slot_index, req.model, req.system_prompt, "",
         req.params.model_dump() if req.params else None,
         req.title, dual_config=dual_config,
     ):
@@ -429,7 +438,7 @@ def import_backup(slot_index: int, req: ImportSlotRequest):
         }
         for message in req.messages
     ]
-    if messages and not mgr.append_messages(slot_index, messages):
-        mgr.delete_slot(slot_index)
+    if messages and not mgr.append_messages(uid, slot_index, messages):
+        mgr.delete_slot(uid, slot_index)
         error("import_failed", "导入存档消息失败", 500)
     return {"ok": True}

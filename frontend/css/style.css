@@ -4,6 +4,7 @@
 @import "./variables.css";
 @import "./themes.css";
 @import "./base.css";
+@import "./auth.css";
 @import "./sidebar.css";
 @import "./slots.css";
 @import "./chat.css";

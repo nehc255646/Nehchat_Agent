@@ -26,6 +26,20 @@ ALLOWED_ORIGINS = (
     else ["http://localhost:5173", "http://127.0.0.1:5173"]
 )
 
+# 可选的访问鉴权（Basic Auth）：两者同时设置才启用，用于隧道/端口转发等公网场景
+WEB_USER = os.environ.get("WEB_USER", "").strip()
+WEB_PASSWORD = os.environ.get("WEB_PASSWORD", "").strip()
+if (WEB_USER or WEB_PASSWORD) and not (WEB_USER and WEB_PASSWORD):
+    raise RuntimeError(
+        "WEB_USER 与 WEB_PASSWORD 需要同时设置才能启用访问鉴权（两者都不设则保持无鉴权）"
+    )
+
+# 多用户：注册邀请码（设置后开放注册；不设置则仅允许首次初始化创建账号）
+INVITE_CODE = os.environ.get("INVITE_CODE", "").strip()
+
+# 登录会话有效期（天）
+SESSION_TTL_DAYS = 30
+
 # 限制
 CONTEXT_WINDOW_SIZE = 100   # 每次传给模型的最多消息条数
 CONTEXT_MAX_CHARS = 80_000  # 历史正文总字符上限（超出则从最早的历史裁掉）

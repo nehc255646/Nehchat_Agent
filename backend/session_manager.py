@@ -2,6 +2,8 @@
 Slot Manager — 基于 MySQL 的对话存档存储实现。
 
 提供存档的增删改查、消息追加与删除等数据库操作。
+多用户隔离：slots / messages / providers 全部按 user_id 归属，
+主键与唯一键均为 (user_id, ...) 复合形式；旧库在启动时自动迁移。
 """
 import datetime
 import json
@@ -40,6 +42,41 @@ def _safe_rollback(conn):
             pass
 
 
+def _column_exists(cursor, table: str, column: str) -> bool:
+    cursor.execute(f"SHOW COLUMNS FROM `{table}` LIKE %s", (column,))
+    return cursor.fetchone() is not None
+
+
+def _primary_key_columns(cursor, table: str) -> List[str]:
+    cursor.execute(
+        "SELECT COLUMN_NAME FROM information_schema.STATISTICS "
+        "WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s AND INDEX_NAME = 'PRIMARY' "
+        "ORDER BY SEQ_IN_INDEX",
+        (MYSQL_DATABASE, table),
+    )
+    return [r["COLUMN_NAME"] for r in cursor.fetchall() or []]
+
+
+def _foreign_key_to(cursor, table: str, ref_table: str) -> Optional[str]:
+    cursor.execute(
+        "SELECT CONSTRAINT_NAME FROM information_schema.KEY_COLUMN_USAGE "
+        "WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s AND REFERENCED_TABLE_NAME = %s",
+        (MYSQL_DATABASE, table, ref_table),
+    )
+    row = cursor.fetchone()
+    return row["CONSTRAINT_NAME"] if row else None
+
+
+def _index_columns(cursor, table: str, index_name: str) -> List[str]:
+    cursor.execute(
+        "SELECT COLUMN_NAME FROM information_schema.STATISTICS "
+        "WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s AND INDEX_NAME = %s "
+        "ORDER BY SEQ_IN_INDEX",
+        (MYSQL_DATABASE, table, index_name),
+    )
+    return [r["COLUMN_NAME"] for r in cursor.fetchall() or []]
+
+
 class SlotManager:
     def __init__(self):
         self._ensure_database()
@@ -68,7 +105,7 @@ class SlotManager:
         except Exception as e:
             logger.warning(f"关闭数据库连接池失败: {e}")
 
-    def acquire_slot_lock(self, index: int):
+    def acquire_slot_lock(self, user_id: int, index: int):
         conn = pymysql.connect(
             host=MYSQL_HOST,
             port=MYSQL_PORT,
@@ -79,7 +116,10 @@ class SlotManager:
         )
         try:
             with conn.cursor() as cursor:
-                cursor.execute("SELECT GET_LOCK(%s, 0)", (f"ai_chat_slot_{index}",))
+                cursor.execute(
+                    "SELECT GET_LOCK(%s, 0)",
+                    (f"ai_chat_slot_{user_id}_{index}",),
+                )
                 acquired = cursor.fetchone()[0]
             if not acquired:
                 conn.close()
@@ -89,10 +129,13 @@ class SlotManager:
             conn.close()
             raise
 
-    def release_slot_lock(self, conn, index: int):
+    def release_slot_lock(self, conn, user_id: int, index: int):
         try:
             with conn.cursor() as cursor:
-                cursor.execute("SELECT RELEASE_LOCK(%s)", (f"ai_chat_slot_{index}",))
+                cursor.execute(
+                    "SELECT RELEASE_LOCK(%s)",
+                    (f"ai_chat_slot_{user_id}_{index}",),
+                )
         finally:
             conn.close()
 
@@ -127,13 +170,14 @@ class SlotManager:
             conn.close()
 
     def _init_tables(self):
-        """自动建表（若不存在）。"""
+        """自动建表（若不存在），并将旧库迁移为多用户结构。"""
         conn = _get_connection(self.pool)
         try:
             with conn.cursor() as cursor:
                 cursor.execute("""
                     CREATE TABLE IF NOT EXISTS slots (
-                        id INT PRIMARY KEY,
+                        id INT NOT NULL,
+                        user_id INT NOT NULL DEFAULT 0,
                         model VARCHAR(192) NOT NULL DEFAULT '',
                         system_prompt TEXT,
                         api_key VARCHAR(256) DEFAULT '',
@@ -141,21 +185,25 @@ class SlotManager:
                         params TEXT,
                         dual_config TEXT,
                         created_at VARCHAR(32) DEFAULT '',
-                        updated_at VARCHAR(32) DEFAULT ''
+                        updated_at VARCHAR(32) DEFAULT '',
+                        PRIMARY KEY (user_id, id)
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
                 """)
                 cursor.execute("""
                     CREATE TABLE IF NOT EXISTS messages (
                         id INT AUTO_INCREMENT PRIMARY KEY,
                         slot_id INT NOT NULL,
+                        user_id INT NOT NULL DEFAULT 0,
                         role VARCHAR(16) NOT NULL,
                         source VARCHAR(16) NOT NULL DEFAULT '',
                         content MEDIUMTEXT,
                         created_at VARCHAR(32) DEFAULT '',
-                        FOREIGN KEY (slot_id) REFERENCES slots(id) ON DELETE CASCADE,
-                        INDEX idx_slot_id (slot_id)
+                        FOREIGN KEY (user_id, slot_id) REFERENCES slots(user_id, id)
+                            ON DELETE CASCADE ON UPDATE CASCADE,
+                        INDEX idx_slot_user (user_id, slot_id)
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
                 """)
+
                 for col, col_def in [
                     ("params", "TEXT AFTER title"),
                     ("dual_config", "TEXT AFTER params"),
@@ -188,7 +236,8 @@ class SlotManager:
                 cursor.execute("""
                     CREATE TABLE IF NOT EXISTS providers (
                         id INT AUTO_INCREMENT PRIMARY KEY,
-                        slug VARCHAR(64) NOT NULL UNIQUE,
+                        user_id INT NOT NULL DEFAULT 0,
+                        slug VARCHAR(64) NOT NULL,
                         display_name VARCHAR(64) NOT NULL DEFAULT '',
                         base_url VARCHAR(512) NOT NULL DEFAULT '',
                         api_key VARCHAR(256) DEFAULT '',
@@ -196,7 +245,8 @@ class SlotManager:
                         api_key_env VARCHAR(64) DEFAULT '',
                         sort_order INT NOT NULL DEFAULT 0,
                         created_at VARCHAR(32) DEFAULT '',
-                        updated_at VARCHAR(32) DEFAULT ''
+                        updated_at VARCHAR(32) DEFAULT '',
+                        UNIQUE KEY uniq_user_slug (user_id, slug)
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
                 """)
                 cursor.execute("""
@@ -210,6 +260,9 @@ class SlotManager:
                         INDEX idx_catalog_provider (provider_id)
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
                 """)
+
+                # 所有表就绪后再做多用户迁移（新库为无害的幂等检查）
+                self._migrate_multiuser(cursor)
             conn.commit()
             logger.info("MySQL 数据库表初始化完成")
         except pymysql.Error as e:
@@ -218,6 +271,51 @@ class SlotManager:
             raise
         finally:
             conn.close()
+
+    def _migrate_multiuser(self, cursor):
+        """旧库升级：补齐 user_id 列并把主键/唯一键改为按用户复合。"""
+        legacy_slots = not _column_exists(cursor, "slots", "user_id")
+        if legacy_slots:
+            cursor.execute(
+                "ALTER TABLE `slots` ADD COLUMN `user_id` INT NOT NULL DEFAULT 0 AFTER `id`"
+            )
+            logger.info("多用户迁移：已添加 slots.user_id")
+
+        if _primary_key_columns(cursor, "slots") == ["id"]:
+            fk = _foreign_key_to(cursor, "messages", "slots")
+            if fk:
+                cursor.execute(f"ALTER TABLE `messages` DROP FOREIGN KEY `{fk}`")
+            cursor.execute(
+                "ALTER TABLE `slots` DROP PRIMARY KEY, ADD PRIMARY KEY (`user_id`, `id`)"
+            )
+            logger.info("多用户迁移：slots 主键已改为 (user_id, id)")
+
+        if not _column_exists(cursor, "messages", "user_id"):
+            cursor.execute(
+                "ALTER TABLE `messages` ADD COLUMN `user_id` INT NOT NULL DEFAULT 0 AFTER `slot_id`"
+            )
+            logger.info("多用户迁移：已添加 messages.user_id")
+
+        if not _foreign_key_to(cursor, "messages", "slots"):
+            cursor.execute(
+                "ALTER TABLE `messages` ADD CONSTRAINT `fk_messages_slot_user` "
+                "FOREIGN KEY (`user_id`, `slot_id`) REFERENCES `slots`(`user_id`, `id`) "
+                "ON DELETE CASCADE ON UPDATE CASCADE"
+            )
+            logger.info("多用户迁移：messages 外键已改为复合外键")
+
+        if not _column_exists(cursor, "providers", "user_id"):
+            cursor.execute(
+                "ALTER TABLE `providers` ADD COLUMN `user_id` INT NOT NULL DEFAULT 0 AFTER `id`"
+            )
+            logger.info("多用户迁移：已添加 providers.user_id")
+
+        if _index_columns(cursor, "providers", "slug") == ["slug"]:
+            cursor.execute("ALTER TABLE `providers` DROP INDEX `slug`")
+            cursor.execute(
+                "ALTER TABLE `providers` ADD UNIQUE KEY `uniq_user_slug` (`user_id`, `slug`)"
+            )
+            logger.info("多用户迁移：providers 唯一键已改为 (user_id, slug)")
 
     # ── 通用事务模板 ──
 
@@ -249,7 +347,7 @@ class SlotManager:
 
     # ── 核心 CRUD ──
 
-    def create_slot(self, index: int, model: str, system_prompt: str,
+    def create_slot(self, user_id: int, index: int, model: str, system_prompt: str,
                      api_key: str = "", params: Optional[dict] = None,
                      title: str = "", dual_config: Optional[dict] = None) -> bool:
         if index < 0 or index >= SLOT_COUNT:
@@ -257,7 +355,10 @@ class SlotManager:
         try:
             with self._transaction() as conn:
                 with conn.cursor() as cursor:
-                    cursor.execute("SELECT id FROM slots WHERE id = %s", (index,))
+                    cursor.execute(
+                        "SELECT id FROM slots WHERE user_id = %s AND id = %s",
+                        (user_id, index),
+                    )
                     if cursor.fetchone():
                         return False
                     now = self._now()
@@ -265,54 +366,64 @@ class SlotManager:
                     params_json = json.dumps(params) if params else "{}"
                     dual_json = json.dumps(dual_config) if dual_config else "{}"
                     cursor.execute(
-                        "INSERT INTO slots (id, model, system_prompt, api_key, title, params, dual_config, created_at, updated_at) "
-                        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
-                        (index, model, system_prompt, api_key, title, params_json, dual_json, now, now),
+                        "INSERT INTO slots (id, user_id, model, system_prompt, api_key, title, params, dual_config, created_at, updated_at) "
+                        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                        (index, user_id, model, system_prompt, api_key, title, params_json, dual_json, now, now),
                     )
             return True
         except pymysql.Error as e:
-            logger.error(f"create_slot({index}) 失败: {e}")
+            logger.error(f"create_slot(user={user_id}, {index}) 失败: {e}")
             return False
 
-    def get_slot(self, index: int) -> Optional[Dict]:
+    def get_slot(self, user_id: int, index: int) -> Optional[Dict]:
         try:
             with self._transaction() as conn:
                 with conn.cursor() as cursor:
-                    cursor.execute("SELECT * FROM slots WHERE id = %s", (index,))
+                    cursor.execute(
+                        "SELECT * FROM slots WHERE user_id = %s AND id = %s",
+                        (user_id, index),
+                    )
                     slot = cursor.fetchone()
                     if not slot:
                         return None
                     slot["params"] = self._json_or_default(slot.get("params"), {})
                     slot["dual_config"] = self._json_or_default(slot.get("dual_config"), {})
                     cursor.execute(
-                        "SELECT id, role, content, source FROM messages WHERE slot_id = %s ORDER BY id ASC",
-                        (index,),
+                        "SELECT id, role, content, source FROM messages "
+                        "WHERE user_id = %s AND slot_id = %s ORDER BY id ASC",
+                        (user_id, index),
                     )
                     slot["history"] = list(cursor.fetchall())
                     return slot
         except pymysql.Error as e:
-            logger.error(f"get_slot({index}) 失败: {e}")
+            logger.error(f"get_slot(user={user_id}, {index}) 失败: {e}")
             return None
 
-    def delete_slot(self, index: int) -> bool:
+    def delete_slot(self, user_id: int, index: int) -> bool:
         try:
             with self._transaction() as conn:
                 with conn.cursor() as cursor:
-                    cursor.execute("DELETE FROM slots WHERE id = %s", (index,))
+                    cursor.execute(
+                        "DELETE FROM slots WHERE user_id = %s AND id = %s",
+                        (user_id, index),
+                    )
                     deleted = cursor.rowcount > 0
             return deleted
         except pymysql.Error as e:
-            logger.error(f"delete_slot({index}) 失败: {e}")
+            logger.error(f"delete_slot(user={user_id}, {index}) 失败: {e}")
             return False
 
     # 允许通过 update_slot_meta 更新的列（白名单，防止动态 SQL 注入）
     _META_ALLOWED_COLUMNS = {"title", "api_key"}
 
-    def update_slot_meta(self, index: int, meta: dict) -> bool:
+    def update_slot_meta(self, user_id: int, index: int, meta: dict) -> bool:
         try:
             with self._transaction() as conn:
                 with conn.cursor() as cursor:
-                    cursor.execute("SELECT id FROM slots WHERE id = %s", (index,))
+                    cursor.execute(
+                        "SELECT id FROM slots WHERE user_id = %s AND id = %s",
+                        (user_id, index),
+                    )
                     if not cursor.fetchone():
                         return False
                     set_parts = []
@@ -327,39 +438,49 @@ class SlotManager:
                         return False
                     set_parts.append("updated_at = %s")
                     values.append(self._now())
+                    values.append(user_id)
                     values.append(index)
-                    sql = f"UPDATE slots SET {', '.join(set_parts)} WHERE id = %s"
+                    sql = f"UPDATE slots SET {', '.join(set_parts)} WHERE user_id = %s AND id = %s"
                     cursor.execute(sql, values)
             return True
         except pymysql.Error as e:
-            logger.error(f"update_slot_meta({index}) 失败: {e}")
+            logger.error(f"update_slot_meta(user={user_id}, {index}) 失败: {e}")
             return False
 
-    def save_slot_history(self, index: int, history: List) -> bool:
+    def save_slot_history(self, user_id: int, index: int, history: List) -> bool:
         try:
             with self._transaction() as conn:
                 with conn.cursor() as cursor:
-                    cursor.execute("SELECT id FROM slots WHERE id = %s", (index,))
+                    cursor.execute(
+                        "SELECT id FROM slots WHERE user_id = %s AND id = %s",
+                        (user_id, index),
+                    )
                     if not cursor.fetchone():
                         return False
-                    cursor.execute("DELETE FROM messages WHERE slot_id = %s", (index,))
+                    cursor.execute(
+                        "DELETE FROM messages WHERE user_id = %s AND slot_id = %s",
+                        (user_id, index),
+                    )
                     if history:
                         cursor.executemany(
-                            "INSERT INTO messages (slot_id, role, content, source) VALUES (%s, %s, %s, %s)",
-                            [(index, m.get("role", ""), m.get("content", ""), m.get("source", "")) for m in history],
+                            "INSERT INTO messages (slot_id, user_id, role, content, source) VALUES (%s, %s, %s, %s, %s)",
+                            [
+                                (index, user_id, m.get("role", ""), m.get("content", ""), m.get("source", ""))
+                                for m in history
+                            ],
                         )
                     cursor.execute(
-                        "UPDATE slots SET updated_at = %s WHERE id = %s",
-                        (self._now(), index),
+                        "UPDATE slots SET updated_at = %s WHERE user_id = %s AND id = %s",
+                        (self._now(), user_id, index),
                     )
             return True
         except pymysql.Error as e:
-            logger.error(f"save_slot_history({index}) 失败: {e}")
+            logger.error(f"save_slot_history(user={user_id}, {index}) 失败: {e}")
             return False
 
     # ── append-only 写入 ──
 
-    def append_messages(self, slot_id: int, messages: List[Dict]) -> List[int]:
+    def append_messages(self, user_id: int, slot_id: int, messages: List[Dict]) -> List[int]:
         try:
             with self._transaction() as conn:
                 with conn.cursor() as cursor:
@@ -367,55 +488,55 @@ class SlotManager:
                     ids = []
                     for m in messages:
                         cursor.execute(
-                            "INSERT INTO messages (slot_id, role, content, source) VALUES (%s, %s, %s, %s)",
-                            (slot_id, m.get("role", ""), m.get("content", ""), m.get("source", "")),
+                            "INSERT INTO messages (slot_id, user_id, role, content, source) VALUES (%s, %s, %s, %s, %s)",
+                            (slot_id, user_id, m.get("role", ""), m.get("content", ""), m.get("source", "")),
                         )
                         ids.append(cursor.lastrowid)
                     cursor.execute(
-                        "UPDATE slots SET updated_at = %s WHERE id = %s",
-                        (self._now(), slot_id),
+                        "UPDATE slots SET updated_at = %s WHERE user_id = %s AND id = %s",
+                        (self._now(), user_id, slot_id),
                     )
             return ids
         except pymysql.Error as e:
-            logger.error(f"append_messages({slot_id}) 失败: {e}")
+            logger.error(f"append_messages(user={user_id}, {slot_id}) 失败: {e}")
             return []
 
-    def delete_messages_from(self, slot_id: int, from_message_id: int) -> bool:
+    def delete_messages_from(self, user_id: int, slot_id: int, from_message_id: int) -> bool:
         try:
             with self._transaction() as conn:
                 with conn.cursor() as cursor:
                     cursor.execute(
-                        "DELETE FROM messages WHERE slot_id = %s AND id >= %s",
-                        (slot_id, from_message_id),
+                        "DELETE FROM messages WHERE user_id = %s AND slot_id = %s AND id >= %s",
+                        (user_id, slot_id, from_message_id),
                     )
                     cursor.execute(
-                        "UPDATE slots SET updated_at = %s WHERE id = %s",
-                        (self._now(), slot_id),
+                        "UPDATE slots SET updated_at = %s WHERE user_id = %s AND id = %s",
+                        (self._now(), user_id, slot_id),
                     )
             return True
         except pymysql.Error as e:
-            logger.error(f"delete_messages_from({slot_id}, {from_message_id}) 失败: {e}")
+            logger.error(f"delete_messages_from(user={user_id}, {slot_id}, {from_message_id}) 失败: {e}")
             return False
 
-    def delete_messages_after(self, slot_id: int, after_message_id: int) -> bool:
+    def delete_messages_after(self, user_id: int, slot_id: int, after_message_id: int) -> bool:
         """删除某条消息之后的全部消息，保留该条本身。"""
         try:
             with self._transaction() as conn:
                 with conn.cursor() as cursor:
                     cursor.execute(
-                        "DELETE FROM messages WHERE slot_id = %s AND id > %s",
-                        (slot_id, after_message_id),
+                        "DELETE FROM messages WHERE user_id = %s AND slot_id = %s AND id > %s",
+                        (user_id, slot_id, after_message_id),
                     )
                     cursor.execute(
-                        "UPDATE slots SET updated_at = %s WHERE id = %s",
-                        (self._now(), slot_id),
+                        "UPDATE slots SET updated_at = %s WHERE user_id = %s AND id = %s",
+                        (self._now(), user_id, slot_id),
                     )
             return True
         except pymysql.Error as e:
-            logger.error(f"delete_messages_after({slot_id}, {after_message_id}) 失败: {e}")
+            logger.error(f"delete_messages_after(user={user_id}, {slot_id}, {after_message_id}) 失败: {e}")
             return False
 
-    def delete_messages_by_ids(self, slot_id: int, message_ids: List[int]) -> bool:
+    def delete_messages_by_ids(self, user_id: int, slot_id: int, message_ids: List[int]) -> bool:
         """按消息 ID 精确删除（用于删除中间一段消息，不改变其余消息 ID）。"""
         if not message_ids:
             return True
@@ -424,71 +545,76 @@ class SlotManager:
                 with conn.cursor() as cursor:
                     placeholders = ", ".join(["%s"] * len(message_ids))
                     cursor.execute(
-                        f"DELETE FROM messages WHERE slot_id = %s AND id IN ({placeholders})",
-                        (slot_id, *message_ids),
+                        f"DELETE FROM messages WHERE user_id = %s AND slot_id = %s AND id IN ({placeholders})",
+                        (user_id, slot_id, *message_ids),
                     )
                     cursor.execute(
-                        "UPDATE slots SET updated_at = %s WHERE id = %s",
-                        (self._now(), slot_id),
+                        "UPDATE slots SET updated_at = %s WHERE user_id = %s AND id = %s",
+                        (self._now(), user_id, slot_id),
                     )
             return True
         except pymysql.Error as e:
-            logger.error(f"delete_messages_by_ids({slot_id}) 失败: {e}")
+            logger.error(f"delete_messages_by_ids(user={user_id}, {slot_id}) 失败: {e}")
             return False
 
-    def clear_all_messages(self, slot_id: int) -> bool:
+    def clear_all_messages(self, user_id: int, slot_id: int) -> bool:
         try:
             with self._transaction() as conn:
                 with conn.cursor() as cursor:
-                    cursor.execute("DELETE FROM messages WHERE slot_id = %s", (slot_id,))
                     cursor.execute(
-                        "UPDATE slots SET updated_at = %s WHERE id = %s",
-                        (self._now(), slot_id),
+                        "DELETE FROM messages WHERE user_id = %s AND slot_id = %s",
+                        (user_id, slot_id),
+                    )
+                    cursor.execute(
+                        "UPDATE slots SET updated_at = %s WHERE user_id = %s AND id = %s",
+                        (self._now(), user_id, slot_id),
                     )
             return True
         except pymysql.Error as e:
-            logger.error(f"clear_all_messages({slot_id}) 失败: {e}")
+            logger.error(f"clear_all_messages(user={user_id}, {slot_id}) 失败: {e}")
             return False
 
-    def touch_slot(self, index: int) -> bool:
+    def touch_slot(self, user_id: int, index: int) -> bool:
         """仅刷新存档的 updated_at（继续回复等只改内容不新增消息的场景）。"""
         try:
             with self._transaction() as conn:
                 with conn.cursor() as cursor:
                     cursor.execute(
-                        "UPDATE slots SET updated_at = %s WHERE id = %s",
-                        (self._now(), index),
+                        "UPDATE slots SET updated_at = %s WHERE user_id = %s AND id = %s",
+                        (self._now(), user_id, index),
                     )
             return True
         except pymysql.Error as e:
-            logger.error(f"touch_slot({index}) 失败: {e}")
+            logger.error(f"touch_slot(user={user_id}, {index}) 失败: {e}")
             return False
 
-    def update_message_content(self, slot_id: int, message_id: int, content: str) -> bool:
+    def update_message_content(self, user_id: int, slot_id: int, message_id: int, content: str) -> bool:
         try:
             with self._transaction() as conn:
                 with conn.cursor() as cursor:
                     cursor.execute(
-                        "UPDATE messages SET content = %s WHERE id = %s AND slot_id = %s",
-                        (content, message_id, slot_id),
+                        "UPDATE messages SET content = %s WHERE id = %s AND slot_id = %s AND user_id = %s",
+                        (content, message_id, slot_id, user_id),
                     )
                     updated = cursor.rowcount > 0
             return updated
         except pymysql.Error as e:
-            logger.error(f"update_message_content({message_id}) 失败: {e}")
+            logger.error(f"update_message_content(user={user_id}, {message_id}) 失败: {e}")
             return False
 
-    def list_slots(self) -> List[Optional[Dict]]:
+    def list_slots(self, user_id: int) -> List[Optional[Dict]]:
         try:
             with self._transaction() as conn:
                 with conn.cursor() as cursor:
                     cursor.execute("""
                         SELECT s.*,
                                (SELECT COALESCE(SUM(role = 'user'), 0)
-                                FROM messages m WHERE m.slot_id = s.id) AS round_count
+                                FROM messages m
+                                WHERE m.user_id = s.user_id AND m.slot_id = s.id) AS round_count
                         FROM slots s
+                        WHERE s.user_id = %s
                         ORDER BY s.id ASC
-                    """)
+                    """, (user_id,))
                     rows = cursor.fetchall()
                     row_map = {r["id"]: r for r in rows}
                     result = []
@@ -513,27 +639,30 @@ class SlotManager:
                             })
                     return result
         except pymysql.Error as e:
-            logger.error(f"list_slots 失败: {e}")
+            logger.error(f"list_slots(user={user_id}) 失败: {e}")
             return [None] * SLOT_COUNT
 
-    def update_dual_config(self, index: int, dual_config: dict) -> bool:
+    def update_dual_config(self, user_id: int, index: int, dual_config: dict) -> bool:
         """更新 dual_config（如切换响应模式）。"""
         try:
             with self._transaction() as conn:
                 with conn.cursor() as cursor:
-                    cursor.execute("SELECT id FROM slots WHERE id = %s", (index,))
+                    cursor.execute(
+                        "SELECT id FROM slots WHERE user_id = %s AND id = %s",
+                        (user_id, index),
+                    )
                     if not cursor.fetchone():
                         return False
                     cursor.execute(
-                        "UPDATE slots SET dual_config = %s, updated_at = %s WHERE id = %s",
-                        (json.dumps(dual_config), self._now(), index),
+                        "UPDATE slots SET dual_config = %s, updated_at = %s WHERE user_id = %s AND id = %s",
+                        (json.dumps(dual_config), self._now(), user_id, index),
                     )
             return True
         except pymysql.Error as e:
-            logger.error(f"update_dual_config({index}) 失败: {e}")
+            logger.error(f"update_dual_config(user={user_id}, {index}) 失败: {e}")
             return False
 
-    def update_slot(self, index: int, model: str | None = None,
+    def update_slot(self, user_id: int, index: int, model: str | None = None,
                     system_prompt: str | None = None, api_key: str | None = None,
                     title: str | None = None, params: dict | None = None,
                     dual_config: dict | None = None) -> bool:
@@ -545,7 +674,10 @@ class SlotManager:
         try:
             with self._transaction() as conn:
                 with conn.cursor() as cursor:
-                    cursor.execute("SELECT id FROM slots WHERE id = %s", (index,))
+                    cursor.execute(
+                        "SELECT id FROM slots WHERE user_id = %s AND id = %s",
+                        (user_id, index),
+                    )
                     if not cursor.fetchone():
                         return False
                     set_parts = []
@@ -572,12 +704,13 @@ class SlotManager:
                         return False
                     set_parts.append("updated_at = %s")
                     values.append(self._now())
+                    values.append(user_id)
                     values.append(index)
-                    sql = f"UPDATE slots SET {', '.join(set_parts)} WHERE id = %s"
+                    sql = f"UPDATE slots SET {', '.join(set_parts)} WHERE user_id = %s AND id = %s"
                     cursor.execute(sql, values)
             return True
         except pymysql.Error as e:
-            logger.error(f"update_slot({index}) 失败: {e}")
+            logger.error(f"update_slot(user={user_id}, {index}) 失败: {e}")
             return False
 
     # ── 供应商 / 模型目录 ──
@@ -603,12 +736,13 @@ class SlotManager:
             })
         return items
 
-    def list_providers(self) -> List[Dict]:
+    def list_providers(self, user_id: int) -> List[Dict]:
         try:
             with self._transaction() as conn:
                 with conn.cursor() as cursor:
                     cursor.execute(
-                        "SELECT * FROM providers ORDER BY sort_order ASC, id ASC"
+                        "SELECT * FROM providers WHERE user_id = %s ORDER BY sort_order ASC, id ASC",
+                        (user_id,),
                     )
                     rows = list(cursor.fetchall() or [])
                     result = []
@@ -622,14 +756,17 @@ class SlotManager:
                         })
                     return result
         except pymysql.Error as e:
-            logger.error(f"list_providers 失败: {e}")
+            logger.error(f"list_providers(user={user_id}) 失败: {e}")
             raise RuntimeError(f"读取供应商目录失败: {e}")
 
-    def get_provider(self, provider_id: int) -> Optional[Dict]:
+    def get_provider(self, user_id: int, provider_id: int) -> Optional[Dict]:
         try:
             with self._transaction() as conn:
                 with conn.cursor() as cursor:
-                    cursor.execute("SELECT * FROM providers WHERE id = %s", (provider_id,))
+                    cursor.execute(
+                        "SELECT * FROM providers WHERE id = %s AND user_id = %s",
+                        (provider_id, user_id),
+                    )
                     row = cursor.fetchone()
                     if not row:
                         return None
@@ -638,10 +775,10 @@ class SlotManager:
                     )
                     return row
         except pymysql.Error as e:
-            logger.error(f"get_provider({provider_id}) 失败: {e}")
+            logger.error(f"get_provider(user={user_id}, {provider_id}) 失败: {e}")
             raise RuntimeError(f"读取供应商失败: {e}")
 
-    def get_catalog_model(self, model_row_id: int) -> Optional[Dict]:
+    def get_catalog_model(self, user_id: int, model_row_id: int) -> Optional[Dict]:
         try:
             with self._transaction() as conn:
                 with conn.cursor() as cursor:
@@ -651,15 +788,15 @@ class SlotManager:
                         "p.api_key, p.use_env_key, p.api_key_env "
                         "FROM catalog_models m "
                         "JOIN providers p ON p.id = m.provider_id "
-                        "WHERE m.id = %s",
-                        (model_row_id,),
+                        "WHERE m.id = %s AND p.user_id = %s",
+                        (model_row_id, user_id),
                     )
                     return cursor.fetchone()
         except pymysql.Error as e:
-            logger.error(f"get_catalog_model({model_row_id}) 失败: {e}")
+            logger.error(f"get_catalog_model(user={user_id}, {model_row_id}) 失败: {e}")
             raise RuntimeError(f"读取模型失败: {e}")
 
-    def resolve_model_key(self, key: str) -> Optional[Dict]:
+    def resolve_model_key(self, user_id: int, key: str) -> Optional[Dict]:
         if not key or ":" not in key:
             return None
         slug, model_id = key.split(":", 1)
@@ -674,15 +811,15 @@ class SlotManager:
                         "p.api_key, p.use_env_key, p.api_key_env "
                         "FROM catalog_models m "
                         "JOIN providers p ON p.id = m.provider_id "
-                        "WHERE p.slug = %s AND m.model_id = %s",
-                        (slug, model_id),
+                        "WHERE p.slug = %s AND m.model_id = %s AND p.user_id = %s",
+                        (slug, model_id, user_id),
                     )
                     return cursor.fetchone()
         except pymysql.Error as e:
-            logger.error(f"resolve_model_key({key}) 失败: {e}")
+            logger.error(f"resolve_model_key(user={user_id}, {key}) 失败: {e}")
             raise RuntimeError(f"解析模型失败: {e}")
 
-    def list_catalog_models(self) -> List[Dict]:
+    def list_catalog_models(self, user_id: int) -> List[Dict]:
         try:
             with self._transaction() as conn:
                 with conn.cursor() as cursor:
@@ -692,7 +829,9 @@ class SlotManager:
                         "p.sort_order "
                         "FROM catalog_models m "
                         "JOIN providers p ON p.id = m.provider_id "
-                        "ORDER BY p.sort_order ASC, p.id ASC, m.id ASC"
+                        "WHERE p.user_id = %s "
+                        "ORDER BY p.sort_order ASC, p.id ASC, m.id ASC",
+                        (user_id,),
                     )
                     items = []
                     for row in cursor.fetchall() or []:
@@ -707,19 +846,22 @@ class SlotManager:
                         })
                     return items
         except pymysql.Error as e:
-            logger.error(f"list_catalog_models 失败: {e}")
+            logger.error(f"list_catalog_models(user={user_id}) 失败: {e}")
             raise RuntimeError(f"读取模型列表失败: {e}")
 
-    def _slot_rows(self, cursor) -> List[Dict]:
-        cursor.execute("SELECT id, model, dual_config FROM slots")
+    def _slot_rows(self, user_id: int, cursor) -> List[Dict]:
+        cursor.execute(
+            "SELECT id, model, dual_config FROM slots WHERE user_id = %s",
+            (user_id,),
+        )
         return list(cursor.fetchall() or [])
 
-    def find_slots_referencing_model_key(self, key: str) -> List[int]:
+    def find_slots_referencing_model_key(self, user_id: int, key: str) -> List[int]:
         try:
             with self._transaction() as conn:
                 with conn.cursor() as cursor:
                     hits = []
-                    for row in self._slot_rows(cursor):
+                    for row in self._slot_rows(user_id, cursor):
                         if row.get("model") == key:
                             hits.append(row["id"])
                             continue
@@ -729,16 +871,16 @@ class SlotManager:
                             hits.append(row["id"])
                     return hits
         except pymysql.Error as e:
-            logger.error(f"find_slots_referencing_model_key 失败: {e}")
+            logger.error(f"find_slots_referencing_model_key(user={user_id}) 失败: {e}")
             raise RuntimeError(f"检查模型引用失败: {e}")
 
-    def find_slots_referencing_provider_slug(self, slug: str) -> List[int]:
+    def find_slots_referencing_provider_slug(self, user_id: int, slug: str) -> List[int]:
         prefix = f"{slug}:"
         try:
             with self._transaction() as conn:
                 with conn.cursor() as cursor:
                     hits = []
-                    for row in self._slot_rows(cursor):
+                    for row in self._slot_rows(user_id, cursor):
                         model = row.get("model") or ""
                         if model.startswith(prefix):
                             hits.append(row["id"])
@@ -749,10 +891,10 @@ class SlotManager:
                             hits.append(row["id"])
                     return hits
         except pymysql.Error as e:
-            logger.error(f"find_slots_referencing_provider_slug 失败: {e}")
+            logger.error(f"find_slots_referencing_provider_slug(user={user_id}) 失败: {e}")
             raise RuntimeError(f"检查供应商引用失败: {e}")
 
-    def rewrite_model_key_in_slots(self, old_key: str, new_key: str) -> None:
+    def rewrite_model_key_in_slots(self, user_id: int, old_key: str, new_key: str) -> None:
         if not old_key or old_key == new_key:
             return
         now = self._now()
@@ -760,25 +902,26 @@ class SlotManager:
             with self._transaction() as conn:
                 with conn.cursor() as cursor:
                     cursor.execute(
-                        "UPDATE slots SET model = %s, updated_at = %s WHERE model = %s",
-                        (new_key, now, old_key),
+                        "UPDATE slots SET model = %s, updated_at = %s WHERE model = %s AND user_id = %s",
+                        (new_key, now, old_key, user_id),
                     )
-                    for row in self._slot_rows(cursor):
+                    for row in self._slot_rows(user_id, cursor):
                         dual = self._json_or_default(row.get("dual_config"), {})
                         m2 = dual.get("model2") if isinstance(dual.get("model2"), dict) else None
                         if m2 and m2.get("model") == old_key:
                             m2["model"] = new_key
                             dual["model2"] = m2
                             cursor.execute(
-                                "UPDATE slots SET dual_config = %s, updated_at = %s WHERE id = %s",
-                                (json.dumps(dual), now, row["id"]),
+                                "UPDATE slots SET dual_config = %s, updated_at = %s WHERE id = %s AND user_id = %s",
+                                (json.dumps(dual), now, row["id"], user_id),
                             )
         except pymysql.Error as e:
-            logger.error(f"rewrite_model_key_in_slots 失败: {e}")
+            logger.error(f"rewrite_model_key_in_slots(user={user_id}) 失败: {e}")
             raise RuntimeError(f"同步存档模型引用失败: {e}")
 
     def create_provider(
         self,
+        user_id: int,
         slug: str,
         display_name: str,
         base_url: str,
@@ -791,15 +934,18 @@ class SlotManager:
         try:
             with self._transaction() as conn:
                 with conn.cursor() as cursor:
-                    cursor.execute("SELECT COALESCE(MAX(sort_order), 0) AS m FROM providers")
+                    cursor.execute(
+                        "SELECT COALESCE(MAX(sort_order), 0) AS m FROM providers WHERE user_id = %s",
+                        (user_id,),
+                    )
                     max_order = (cursor.fetchone() or {}).get("m") or 0
                     cursor.execute(
                         "INSERT INTO providers "
-                        "(slug, display_name, base_url, api_key, use_env_key, api_key_env, "
+                        "(user_id, slug, display_name, base_url, api_key, use_env_key, api_key_env, "
                         "sort_order, created_at, updated_at) "
-                        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
                         (
-                            slug, display_name, base_url, api_key or "",
+                            user_id, slug, display_name, base_url, api_key or "",
                             1 if use_env_key else 0, api_key_env or "",
                             int(max_order) + 1, now, now,
                         ),
@@ -815,7 +961,7 @@ class SlotManager:
                             "VALUES (%s, %s, %s)",
                             (provider_id, mid, dname),
                         )
-            created = self.get_provider(provider_id)
+            created = self.get_provider(user_id, provider_id)
             if not created:
                 raise RuntimeError("创建供应商后读取失败")
             return created
@@ -823,11 +969,12 @@ class SlotManager:
             logger.warning(f"create_provider 冲突: {e}")
             raise ValueError("duplicate") from e
         except pymysql.Error as e:
-            logger.error(f"create_provider 失败: {e}")
+            logger.error(f"create_provider(user={user_id}) 失败: {e}")
             raise RuntimeError(f"创建供应商失败: {e}")
 
     def update_provider(
         self,
+        user_id: int,
         provider_id: int,
         display_name: Optional[str] = None,
         base_url: Optional[str] = None,
@@ -838,7 +985,10 @@ class SlotManager:
         try:
             with self._transaction() as conn:
                 with conn.cursor() as cursor:
-                    cursor.execute("SELECT id FROM providers WHERE id = %s", (provider_id,))
+                    cursor.execute(
+                        "SELECT id FROM providers WHERE id = %s AND user_id = %s",
+                        (provider_id, user_id),
+                    )
                     if not cursor.fetchone():
                         return None
                     parts = []
@@ -864,30 +1014,37 @@ class SlotManager:
                         parts.append("updated_at = %s")
                         values.append(self._now())
                         values.append(provider_id)
+                        values.append(user_id)
                         cursor.execute(
-                            f"UPDATE providers SET {', '.join(parts)} WHERE id = %s",
+                            f"UPDATE providers SET {', '.join(parts)} WHERE id = %s AND user_id = %s",
                             values,
                         )
-            return self.get_provider(provider_id)
+            return self.get_provider(user_id, provider_id)
         except pymysql.Error as e:
-            logger.error(f"update_provider({provider_id}) 失败: {e}")
+            logger.error(f"update_provider(user={user_id}, {provider_id}) 失败: {e}")
             raise RuntimeError(f"更新供应商失败: {e}")
 
-    def delete_provider(self, provider_id: int) -> bool:
+    def delete_provider(self, user_id: int, provider_id: int) -> bool:
         try:
             with self._transaction() as conn:
                 with conn.cursor() as cursor:
-                    cursor.execute("DELETE FROM providers WHERE id = %s", (provider_id,))
+                    cursor.execute(
+                        "DELETE FROM providers WHERE id = %s AND user_id = %s",
+                        (provider_id, user_id),
+                    )
                     return cursor.rowcount > 0
         except pymysql.Error as e:
-            logger.error(f"delete_provider({provider_id}) 失败: {e}")
+            logger.error(f"delete_provider(user={user_id}, {provider_id}) 失败: {e}")
             raise RuntimeError(f"删除供应商失败: {e}")
 
-    def add_catalog_model(self, provider_id: int, model_id: str, display_name: str = "") -> Dict:
+    def add_catalog_model(self, user_id: int, provider_id: int, model_id: str, display_name: str = "") -> Dict:
         try:
             with self._transaction() as conn:
                 with conn.cursor() as cursor:
-                    cursor.execute("SELECT id FROM providers WHERE id = %s", (provider_id,))
+                    cursor.execute(
+                        "SELECT id FROM providers WHERE id = %s AND user_id = %s",
+                        (provider_id, user_id),
+                    )
                     if not cursor.fetchone():
                         raise ValueError("provider_not_found")
                     cursor.execute(
@@ -896,7 +1053,7 @@ class SlotManager:
                         (provider_id, model_id, display_name),
                     )
                     new_id = cursor.lastrowid
-            row = self.get_catalog_model(new_id)
+            row = self.get_catalog_model(user_id, new_id)
             if not row:
                 raise RuntimeError("创建模型后读取失败")
             return row
@@ -905,16 +1062,17 @@ class SlotManager:
         except pymysql.IntegrityError as e:
             raise ValueError("duplicate_model") from e
         except pymysql.Error as e:
-            logger.error(f"add_catalog_model 失败: {e}")
+            logger.error(f"add_catalog_model(user={user_id}) 失败: {e}")
             raise RuntimeError(f"添加模型失败: {e}")
 
     def update_catalog_model(
         self,
+        user_id: int,
         model_row_id: int,
         model_id: Optional[str] = None,
         display_name: Optional[str] = None,
     ) -> Optional[Dict]:
-        existing = self.get_catalog_model(model_row_id)
+        existing = self.get_catalog_model(user_id, model_row_id)
         if existing is None:
             return None
         old_key = self.model_key(existing.get("slug") or "", existing.get("model_id") or "")
@@ -938,20 +1096,22 @@ class SlotManager:
         except pymysql.IntegrityError as e:
             raise ValueError("duplicate_model") from e
         except pymysql.Error as e:
-            logger.error(f"update_catalog_model 失败: {e}")
+            logger.error(f"update_catalog_model(user={user_id}) 失败: {e}")
             raise RuntimeError(f"更新模型失败: {e}")
-        updated = self.get_catalog_model(model_row_id)
+        updated = self.get_catalog_model(user_id, model_row_id)
         if updated and model_id is not None:
             new_key = self.model_key(updated.get("slug") or "", updated.get("model_id") or "")
-            self.rewrite_model_key_in_slots(old_key, new_key)
+            self.rewrite_model_key_in_slots(user_id, old_key, new_key)
         return updated
 
-    def delete_catalog_model(self, model_row_id: int) -> bool:
+    def delete_catalog_model(self, user_id: int, model_row_id: int) -> bool:
+        if not self.get_catalog_model(user_id, model_row_id):
+            return False
         try:
             with self._transaction() as conn:
                 with conn.cursor() as cursor:
                     cursor.execute("DELETE FROM catalog_models WHERE id = %s", (model_row_id,))
                     return cursor.rowcount > 0
         except pymysql.Error as e:
-            logger.error(f"delete_catalog_model 失败: {e}")
+            logger.error(f"delete_catalog_model(user={user_id}) 失败: {e}")
             raise RuntimeError(f"删除模型失败: {e}")

@@ -79,5 +79,8 @@ export async function postSse(path, body, onEvent) {
     body: JSON.stringify(body ?? {}),
     signal: state.abortController.signal,
   });
+  if (response.status === 401) {
+    window.dispatchEvent(new CustomEvent("app-unauthorized"));
+  }
   await readSse(response, onEvent);
 }

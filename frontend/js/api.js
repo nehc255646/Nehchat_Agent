@@ -21,6 +21,11 @@ async function apiFetch(path, options = {}, retries = MAX_RETRIES) {
         return res.json();
       }
 
+      // 登录过期：通知全局切换到登录视图
+      if (res.status === 401 && !options.skipAuthEvent) {
+        window.dispatchEvent(new CustomEvent("app-unauthorized"));
+      }
+
       // 结构化错误解析
       let detail;
       try {
@@ -70,22 +75,25 @@ export function apiGet(path, options) {
   return apiFetch(path, { ...options, method: "GET" });
 }
 
-export function apiPost(path, body) {
+export function apiPost(path, body, options) {
   return apiFetch(path, {
+    ...options,
     method: "POST",
     body: JSON.stringify(body),
   });
 }
 
-export function apiPatch(path, body) {
+export function apiPatch(path, body, options) {
   return apiFetch(path, {
+    ...options,
     method: "PATCH",
     body: JSON.stringify(body),
   });
 }
 
-export function apiDelete(path, body) {
+export function apiDelete(path, body, options) {
   return apiFetch(path, {
+    ...options,
     method: "DELETE",
     body: body ? JSON.stringify(body) : undefined,
   });

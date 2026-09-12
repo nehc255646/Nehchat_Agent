@@ -14,7 +14,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from config import FRONTEND_DIR, ALLOWED_ORIGINS, BACKGROUNDS_DIR
+from config import FRONTEND_DIR, ALLOWED_ORIGINS, BACKGROUNDS_DIR, WEB_USER, WEB_PASSWORD
+from auth import BasicAuthMiddleware
+from accounts import AccountManager
 from clients import AIClient
 from session_manager import SlotManager
 from state import init as init_state
@@ -23,6 +25,7 @@ from routes.chat import router as chat_router
 from routes.models import router as models_router
 from routes.backgrounds import router as backgrounds_router
 from routes.catalog import router as catalog_router
+from routes.auth import router as auth_router
 
 # ── Logging ──
 
@@ -37,10 +40,12 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     ai_client = None
     slot_mgr = None
+    account_mgr = None
     try:
         ai_client = AIClient()
         slot_mgr = SlotManager()
-        init_state(ai_client, slot_mgr)
+        account_mgr = AccountManager(slot_mgr.pool)
+        init_state(ai_client, slot_mgr, account_mgr)
         logger.info("服务初始化完成")
     except RuntimeError as e:
         logger.critical(f"服务启动失败: {e}")
@@ -64,6 +69,14 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Nehchat Agent - 存档版", lifespan=lifespan)
+
+# ── 可选访问鉴权（CORS 之外层：先注册则位于 CORS 内层） ──
+if WEB_USER and WEB_PASSWORD:
+    app.add_middleware(BasicAuthMiddleware, username=WEB_USER, password=WEB_PASSWORD)
+    logger.info("已启用访问鉴权（HTTP Basic）")
+else:
+    logger.info("未设置 WEB_USER/WEB_PASSWORD，运行于无鉴权模式")
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
@@ -79,6 +92,7 @@ app.include_router(chat_router)
 app.include_router(models_router)
 app.include_router(catalog_router)
 app.include_router(backgrounds_router)
+app.include_router(auth_router)
 
 # ── Serve background images ──
 # 静态挂载需在 / 前端挂载之前注册（/ 为兜底路由）

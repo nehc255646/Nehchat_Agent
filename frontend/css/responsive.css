@@ -78,6 +78,10 @@
     padding: 5px 10px;
   }
 
+  #logout-btn-slot {
+    right: 412px;
+  }
+
   #chat-messages {
     padding: 16px 14px;
     gap: 16px;
@@ -99,6 +103,92 @@
     grid-template-columns: repeat(2, 1fr);
     gap: 12px;
     padding: 0 12px 24px;
+  }
+
+  /* 顶部按钮排布收紧 + 注销移到第二行，避免重叠与溢出 */
+  #import-backup-slot-btn {
+    right: 90px;
+  }
+
+  #theme-btn-slot {
+    right: 186px;
+  }
+
+  #catalog-btn-slot {
+    right: 268px;
+    padding: 5px 10px;
+  }
+
+  #logout-btn-slot {
+    top: 52px;
+    right: 12px;
+  }
+
+  /* 聊天页顶部：手机隐藏模型徽标，避免与图标按钮重叠（模型信息在侧栏可见） */
+  #current-model-badge {
+    display: none;
+  }
+
+  /* 模型配置弹层：手机端上下堆叠，供应商列表变横向滚动条 */
+  .catalog-modal-content {
+    width: calc(100vw - 16px);
+    max-height: 92vh;
+  }
+  .catalog-layout {
+    flex-direction: column;
+    min-height: 0;
+    max-height: calc(92vh - 56px);
+  }
+  .catalog-sidebar {
+    width: 100%;
+    flex-direction: row;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 12px;
+    border-right: none;
+    border-bottom: 1px solid var(--glass-border);
+    overflow: hidden;
+    flex-shrink: 0;
+  }
+  #catalog-add-provider {
+    width: auto;
+    flex-shrink: 0;
+    white-space: nowrap;
+  }
+  #catalog-provider-list {
+    display: flex;
+    gap: 8px;
+    flex: 1;
+    overflow-x: auto;
+  }
+  .catalog-provider-item {
+    width: auto;
+    flex-shrink: 0;
+    white-space: nowrap;
+    padding: 8px 12px;
+    border: 1px solid var(--glass-border);
+  }
+  .catalog-provider-meta {
+    display: none;
+  }
+  .catalog-empty-side {
+    white-space: nowrap;
+  }
+  .catalog-main {
+    padding: 14px 14px 16px;
+    gap: 12px;
+  }
+
+  /* 创建向导：手机端隐藏步骤文字，仅保留数字，避免指示器横向溢出 */
+  .wizard-step-label {
+    display: none;
+  }
+  .wizard-step {
+    gap: 0;
+  }
+  .wizard-step-connector {
+    width: 14px;
+    margin: 0 5px;
   }
   .slot-card {
     min-height: 160px;

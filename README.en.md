@@ -16,9 +16,9 @@
 
 ---
 
-A ready-to-run local AI chat application: add any OpenAI-compatible provider and models yourself in "Model Settings", and manage multiple independent conversations across 10 save slots. Supports single-model chat and dual-model role-play (the two models reply in turn and relay to each other), with full SSE streaming, MySQL persistence, theme switching, custom background images, Markdown rendering, and complete backup/restore.
+A ready-to-run AI chat application: add any OpenAI-compatible provider and models yourself in "Model Settings", and manage multiple independent conversations across 10 save slots. Supports single-model chat and dual-model role-play (the two models reply in turn and relay to each other), with full SSE streaming, MySQL persistence, multi-user accounts with per-user data isolation, theme switching, custom background images, Markdown rendering, and complete backup/restore.
 
-Frontend: Vite + vanilla JS. Backend: FastAPI + MySQL. One-click scripts to start — no accounts, no auth setup (local use only).
+Frontend: Vite + vanilla JS. Backend: FastAPI + MySQL. One-click scripts to start; built-in account login with per-user data isolation — open registration via an invite code, plus an optional Basic Auth layer for public tunnels.
 
 ## Table of Contents
 
@@ -37,6 +37,14 @@ Frontend: Vite + vanilla JS. Backend: FastAPI + MySQL. One-click scripts to star
 - [Security & License](#-security--license)
 
 ## ✨ Features
+
+### 👥 Multi-User & Accounts
+
+- **First-run setup**: create the admin account on first visit (localhost only); existing data is claimed by that account automatically
+- **Invite-code registration**: set `INVITE_CODE` in `.env` to open registration; when unset, only existing accounts can sign in
+- **Per-user isolation**: slots, messages, providers, and the model catalog are isolated per user
+- **Secure storage**: scrypt-salted password hashes; HttpOnly cookie sessions (30 days) with logout
+- **Optional outer gate**: add `WEB_USER` / `WEB_PASSWORD` for an extra HTTP Basic Auth layer on public tunnels
 
 ### 🗂️ Save Slots
 
@@ -111,6 +119,7 @@ Frontend: Vite + vanilla JS. Backend: FastAPI + MySQL. One-click scripts to star
 1. **Configure the database**: create a `.env` file in the project root (see [Configuration](#️-configuration)); `MYSQL_PASSWORD` is required
 2. **First run / after dependency changes**: double-click `重置启动.bat` (Reset & Start) — installs backend deps, builds the frontend, starts the server with `--reload`, and opens your browser
 3. **Daily start**: double-click `快速启动.bat` (Quick Start) — checks port 8000, starts the backend, and opens your browser automatically
+4. **First visit**: the page asks you to create the admin account (localhost only); existing data is claimed automatically. To invite friends, set `INVITE_CODE` in `.env`
 
 > The `ai_chat` database and all tables (`slots` / `messages` / `providers` / `catalog_models`) are **created automatically** on first startup, including column-level migrations for older schemas — no manual SQL needed.
 
@@ -121,6 +130,10 @@ cd backend
 python -m uvicorn main:app --host 127.0.0.1 --port 8000
 # Visit http://localhost:8000
 ```
+
+### Public Access (optional)
+
+Double-click `公网隧道.bat` (Public Tunnel): it starts the backend and creates a Cloudflare quick tunnel (`cloudflared`), printing a public `https://*.trycloudflare.com` URL. The service still runs on your machine; closing the window tears the tunnel down. All data requires account login; for an extra gate, set `WEB_USER` / `WEB_PASSWORD` in `.env` to add HTTP Basic Auth.
 
 ## ⚙️ Configuration
 
@@ -134,6 +147,9 @@ Set via the root `.env` file or system environment variables:
 | `MYSQL_PASSWORD` | **Yes** | — | Startup fails when unset |
 | `MYSQL_DATABASE` | No | `ai_chat` | Database name (auto-created) |
 | `ALLOWED_ORIGINS` | No | `http://localhost:5173,...` | CORS allowlist, comma-separated |
+| `INVITE_CODE` | No | — | Registration invite code; when unset only existing accounts can sign in |
+| `WEB_USER` | No | — | Optional Basic Auth outer-gate username (stacked with account login) |
+| `WEB_PASSWORD` | No | — | Optional Basic Auth outer-gate password |
 | `UVICORN_HOST` | No | `127.0.0.1` | Listen address (when using `python main.py`) |
 | `UVICORN_RELOAD` | No | `0` | Hot-reload toggle (when using `python main.py`) |
 
@@ -185,11 +201,14 @@ AI_project/
 │  ├─ main.py             # FastAPI entry: lifespan init, router registration, static hosting
 │  ├─ config.py           # MySQL / slots / context window / backgrounds / default params
 │  ├─ clients.py          # AIClient: streaming calls, hello test, retries & error mapping
+│  ├─ auth.py             # Optional Basic Auth middleware + session dependency
+│  ├─ accounts.py         # Accounts & sessions: scrypt hashing, login, legacy data claim
 │  ├─ helpers.py          # error / resolve_slot / get_runtime / secret resolution
 │  ├─ models.py           # Pydantic request/response models
 │  ├─ session_manager.py  # SlotManager: DB bootstrap, CRUD, catalog, locks & transactions
 │  ├─ state.py            # Global singletons
 │  ├─ routes/
+│  │  ├─ auth.py          # Setup / invite registration / login / logout / me
 │  │  ├─ slots.py         # Slot CRUD, message ops, config update, backup import/export
 │  │  ├─ chat.py          # SSE streams for /api/chat and continue (single/dual)
 │  │  ├─ models.py        # Model list / env-check / default params
@@ -203,6 +222,7 @@ AI_project/
 │  │  ├─ api.js           # apiFetch: exponential backoff (no retry on 4xx)
 │  │  ├─ state.js         # Global state
 │  │  ├─ chat.js          # SSE parsing, send/continue/cancel/regenerate/edit
+│  │  ├─ auth.js          # Login / register / first-run setup view & 401 handling
 │  │  ├─ catalog.js       # Model settings modal (provider/model CRUD & test)
 │  │  ├─ modals.js        # 6-step creation wizard (reused for editing)
 │  │  ├─ theme.js         # Themes & light/dark mode
@@ -212,12 +232,24 @@ AI_project/
 │  └─ vite.config.js      # dev 5173 proxies /api and /backgrounds → 8000
 ├─ 快速启动.bat            # Quick Start: port check + start server + open browser
 ├─ 重置启动.bat            # Reset & Start: install deps + build frontend + --reload
+├─ 公网隧道.bat            # Public tunnel: cloudflared + backend + account login
 └─ .env                   # Local environment variables (gitignored)
 ```
 
 ## 🔌 API Reference
 
-Errors are uniform `{code, message, detail}`; the frontend maps them to localized toasts / inline cards.
+Errors are uniform `{code, message, detail}`; the frontend maps them to localized toasts / inline cards. Except for `/api/auth/*`, every `/api` endpoint requires a session cookie.
+
+### Accounts
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/auth/status` | Initialized / registration-enabled flags (no login needed) |
+| `POST` | `/api/auth/setup` | First-run admin creation (localhost only, claims legacy data) |
+| `POST` | `/api/auth/register` | Invite-code registration |
+| `POST` | `/api/auth/login` | Login (sets session cookie) |
+| `POST` | `/api/auth/logout` | Log out current session |
+| `GET` | `/api/auth/me` | Current user |
 
 ### Slots & Messages
 
@@ -309,8 +341,8 @@ Schema changes are migrated automatically by column detection in `_init_tables` 
 
 ## 🔒 Security & License
 
-- The project has **no authentication**; the server listens on `127.0.0.1` only — do not expose the port to the public internet
-- API keys are stored in plain text in MySQL (or injected via environment variables); secure your machine accordingly
+- The project has **built-in account login and per-user data isolation**; the server listens on `127.0.0.1` only. When exposing it publicly, consider adding `WEB_USER` / `WEB_PASSWORD` for an extra Basic Auth gate
+- Passwords are stored as scrypt-salted hashes; API keys are stored in plain text in MySQL (or injected via environment variables); secure your machine accordingly
 - No open-source license declared; for local personal use only
 
 ---
