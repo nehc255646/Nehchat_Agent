@@ -173,6 +173,8 @@ export async function sendMessage(opts = {}) {
   let errorHandled = false; // 是否已显示错误提示
   let aborted = false;      // 本轮是否被取消/超时中断
   let userMessageId = null;
+  let streamError = null;
+  let streamRetry = null;
 
   try {
     const payload = {
@@ -309,7 +311,8 @@ export async function sendMessage(opts = {}) {
             }
             if (userMsgDiv && !fromId) userMsgDiv.remove();
           }
-          addErrorMessage(streamErrorText(code, content), (hasCompleted || fromId) ? null : text);
+          streamError = streamErrorText(code, content);
+          streamRetry = (hasCompleted || fromId) ? null : text;
           break;
         }
       }
@@ -333,7 +336,8 @@ export async function sendMessage(opts = {}) {
         currentBubble = null;
       }
       if (userMsgDiv && !fromId) userMsgDiv.remove();
-      addErrorMessage(`请求失败: ${e.message}`, fromId ? null : text);
+      streamError = `请求失败: ${e.message}`;
+      streamRetry = fromId ? null : text;
     }
   } finally {
     // 手动取消（streamCancelled）与超时中断（aborted）都需回滚本轮气泡；
@@ -346,19 +350,25 @@ export async function sendMessage(opts = {}) {
     }
   }
 
-  await refreshSlotAfterStream({ gotDone, errorHandled, aborted });
+  await refreshSlotAfterStream({
+    gotDone, errorHandled, aborted,
+    errorText: streamError, retryText: streamRetry,
+  });
   document.getElementById("message-input")?.focus();
 }
 
-async function refreshSlotAfterStream({ gotDone, errorHandled, aborted }) {
+async function refreshSlotAfterStream({
+  gotDone, errorHandled, aborted, errorText = null, retryText = null,
+}) {
   if (state.currentSlotIndex !== null) {
     try {
       state.currentSlotData = await apiGet(`/api/slots/${state.currentSlotIndex}/chat`);
       state.dualEnabled = state.currentSlotData.dual_enabled || false;
       state.responseMode = state.currentSlotData.response_mode || "both";
       state.firstModel = state.currentSlotData.first_model || "model1";
-      if (!gotDone && !errorHandled && !state.streamCancelled && !aborted) {
+      if (!gotDone) {
         renderMessages(state.currentSlotData.history || []);
+        if (errorText) addErrorMessage(errorText, retryText);
       }
       updateSidebarInfo();
     } catch (_) { /* 静默失败 */ }
@@ -436,6 +446,7 @@ export async function continueLastReply() {
   let gotDone = false;
   let errorHandled = false;
   let aborted = false;
+  let streamError = null;
 
   setStreaming(true);
   state.abortController = new AbortController();
@@ -463,7 +474,7 @@ export async function continueLastReply() {
           errorHandled = true;
           contentDiv.innerHTML = renderMarkdown(originalText);
           enhanceCodeBlocks(contentDiv);
-          addErrorMessage(streamErrorText(event.code, event.content));
+          streamError = streamErrorText(event.code, event.content);
           break;
         }
       }
@@ -475,7 +486,7 @@ export async function continueLastReply() {
       errorHandled = true;
       contentDiv.innerHTML = renderMarkdown(originalText);
       enhanceCodeBlocks(contentDiv);
-      addErrorMessage(`请求失败: ${e.message}`);
+      streamError = `请求失败: ${e.message}`;
     }
   } finally {
     if (state.streamCancelled) {
@@ -489,7 +500,9 @@ export async function continueLastReply() {
     finishStreaming(bubble);
   }
 
-  await refreshSlotAfterStream({ gotDone, errorHandled, aborted });
+  await refreshSlotAfterStream({
+    gotDone, errorHandled, aborted, errorText: streamError,
+  });
 }
 
 /** 双模型「继续」：跳过用户消息，两个模型按 response_mode / first_model 正常回复一轮 */
@@ -499,6 +512,7 @@ async function continueDualTurn() {
   let gotDone = false;
   let errorHandled = false;
   let aborted = false;
+  let streamError = null;
 
   const removeNewBubbles = () => {
     bubbles.forEach((b) => {
@@ -584,7 +598,7 @@ async function continueDualTurn() {
             if (d) d.remove();
             currentBubble = null;
           }
-          addErrorMessage(streamErrorText(event.code, event.content));
+          streamError = streamErrorText(event.code, event.content);
           break;
         }
       }
@@ -595,7 +609,7 @@ async function continueDualTurn() {
     } else {
       errorHandled = true;
       removeNewBubbles();
-      addErrorMessage(`请求失败: ${e.message}`);
+      streamError = `请求失败: ${e.message}`;
     }
   } finally {
     if (state.streamCancelled || aborted) {
@@ -604,7 +618,9 @@ async function continueDualTurn() {
     }
   }
 
-  await refreshSlotAfterStream({ gotDone, errorHandled, aborted });
+  await refreshSlotAfterStream({
+    gotDone, errorHandled, aborted, errorText: streamError,
+  });
 }
 
 // ── 重新生成（单/双模型通用） ──

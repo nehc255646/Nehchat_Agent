@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 import re
+from contextlib import contextmanager
 
 from fastapi import HTTPException
 
@@ -31,6 +32,21 @@ def resolve_slot(user_id: int, slot_index: int) -> dict:
     if data is None:
         error("slot_not_found", f"存档 #{slot_index + 1} 不存在", 404)
     return data
+
+
+@contextmanager
+def slot_mutation_lock(user_id: int, slot_index: int):
+    """占用该存档的 MySQL 命名锁，避免与流式生成或其它写入交错。"""
+    if slot_index < 0 or slot_index >= SLOT_COUNT:
+        error("invalid_slot", f"存档位 {slot_index} 无效（0-{SLOT_COUNT - 1}）", 400)
+    mgr = get_slot_mgr()
+    conn = mgr.acquire_slot_lock(user_id, slot_index)
+    if conn is None:
+        error("slot_busy", "该存档正在生成回复或被占用，请稍后重试", 409)
+    try:
+        yield
+    finally:
+        mgr.release_slot_lock(conn, user_id, slot_index)
 
 
 def normalize_base_url(url: str) -> str:

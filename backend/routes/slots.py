@@ -20,7 +20,7 @@ from models import (
     ImportSlotRequest,
     UpdateSlotRequest,
 )
-from helpers import error, resolve_slot, validate_model_key
+from helpers import error, resolve_slot, slot_mutation_lock, validate_model_key
 from state import get_slot_mgr
 
 logger = logging.getLogger(__name__)
@@ -86,8 +86,9 @@ def create_slot(slot_index: int, req: CreateSlotRequest, user: dict = Depends(cu
 
 @router.delete("/api/slots/{slot_index}")
 def delete_slot(slot_index: int, user: dict = Depends(current_user)):
-    if not get_slot_mgr().delete_slot(user["id"], slot_index):
-        error("slot_not_found", "存档不存在", 404)
+    with slot_mutation_lock(user["id"], slot_index):
+        if not get_slot_mgr().delete_slot(user["id"], slot_index):
+            error("slot_not_found", "存档不存在", 404)
     return {"ok": True}
 
 
@@ -114,10 +115,10 @@ def get_slot_chat(slot_index: int, user: dict = Depends(current_user)):
 @router.post("/api/slots/{slot_index}/chat/clear")
 def clear_slot_chat(slot_index: int, user: dict = Depends(current_user)):
     uid = user["id"]
-    resolve_slot(uid, slot_index)  # 校验存档存在
-    mgr = get_slot_mgr()
-    if not mgr.clear_all_messages(uid, slot_index):
-        error("clear_failed", "清空对话失败", 500)
+    with slot_mutation_lock(uid, slot_index):
+        resolve_slot(uid, slot_index)
+        if not get_slot_mgr().clear_all_messages(uid, slot_index):
+            error("clear_failed", "清空对话失败", 500)
     return {"ok": True}
 
 
@@ -130,38 +131,38 @@ def delete_messages(slot_index: int, req: DeleteMessageRequest, user: dict = Dep
     """
     uid = user["id"]
     mgr = get_slot_mgr()
-    resolve_slot(uid, slot_index)
+    with slot_mutation_lock(uid, slot_index):
+        resolve_slot(uid, slot_index)
 
-    if req.from_id is not None:
-        if req.from_id <= 0:
-            error("invalid_message_id", "消息 ID 无效", 400)
-        success = mgr.delete_messages_from(uid, slot_index, req.from_id)
-        if not success:
+        if req.from_id is not None:
+            if req.from_id <= 0:
+                error("invalid_message_id", "消息 ID 无效", 400)
+            success = mgr.delete_messages_from(uid, slot_index, req.from_id)
+            if not success:
+                error("delete_failed", "删除消息失败", 500)
+            return {"ok": True}
+
+        data = resolve_slot(uid, slot_index)
+        history: list = data.get("history", [])
+        total = len(history)
+
+        if req.from_index is None or req.to_index is None:
+            error("invalid_range", "请提供 from_id 或 from_index/to_index", 400)
+        if req.from_index < 0 or req.to_index >= total or req.from_index > req.to_index:
+            error(
+                "invalid_range",
+                f"消息索引无效: [{req.from_index}, {req.to_index}]，历史共 {total} 条",
+                400,
+            )
+
+        ids_to_delete = [
+            m["id"] for m in history[req.from_index: req.to_index + 1] if m.get("id")
+        ]
+        if not ids_to_delete:
+            error("delete_failed", "无法定位要删除的消息", 500)
+        if not mgr.delete_messages_by_ids(uid, slot_index, ids_to_delete):
             error("delete_failed", "删除消息失败", 500)
-        return {"ok": True}
-
-    # 按数组下标删除（通过消息 ID 精确定位，不影响其余消息 ID）
-    data = resolve_slot(uid, slot_index)
-    history: list = data.get("history", [])
-    total = len(history)
-
-    if req.from_index is None or req.to_index is None:
-        error("invalid_range", "请提供 from_id 或 from_index/to_index", 400)
-    if req.from_index < 0 or req.to_index >= total or req.from_index > req.to_index:
-        error(
-            "invalid_range",
-            f"消息索引无效: [{req.from_index}, {req.to_index}]，历史共 {total} 条",
-            400,
-        )
-
-    ids_to_delete = [
-        m["id"] for m in history[req.from_index: req.to_index + 1] if m.get("id")
-    ]
-    if not ids_to_delete:
-        error("delete_failed", "无法定位要删除的消息", 500)
-    if not mgr.delete_messages_by_ids(uid, slot_index, ids_to_delete):
-        error("delete_failed", "删除消息失败", 500)
-    return {"ok": True, "deleted": len(ids_to_delete)}
+        return {"ok": True, "deleted": len(ids_to_delete)}
 
 
 @router.patch("/api/slots/{slot_index}/chat/messages")
@@ -169,42 +170,43 @@ def edit_message(slot_index: int, req: EditMessageRequest, user: dict = Depends(
     """编辑消息。优先使用 message_id 定位。"""
     uid = user["id"]
     mgr = get_slot_mgr()
-    resolve_slot(uid, slot_index)
+    with slot_mutation_lock(uid, slot_index):
+        resolve_slot(uid, slot_index)
 
-    if not req.content:
-        error("empty_content", "消息内容不能为空", 400)
+        if not req.content:
+            error("empty_content", "消息内容不能为空", 400)
 
-    if req.message_id is not None:
-        if req.message_id <= 0:
-            error("invalid_message_id", "消息 ID 无效", 400)
-        success = mgr.update_message_content(uid, slot_index, req.message_id, req.content)
-        if not success:
-            error("message_not_found", f"消息 #{req.message_id} 不存在", 404)
+        if req.message_id is not None:
+            if req.message_id <= 0:
+                error("invalid_message_id", "消息 ID 无效", 400)
+            success = mgr.update_message_content(uid, slot_index, req.message_id, req.content)
+            if not success:
+                error("message_not_found", f"消息 #{req.message_id} 不存在", 404)
+            return {"ok": True}
+
+        data = resolve_slot(uid, slot_index)
+        history: list = data.get("history", [])
+        if req.index is None or req.index < 0 or req.index >= len(history):
+            error("invalid_index", f"消息索引 {req.index} 无效", 400)
+        target = history[req.index]
+        if not target.get("id"):
+            error("message_not_found", "无法定位消息 ID", 404)
+        if not mgr.update_message_content(uid, slot_index, target["id"], req.content):
+            error("message_not_found", f"消息 #{target['id']} 不存在", 404)
         return {"ok": True}
-
-    # 按下标编辑（通过消息 ID 更新，保持其余消息 ID 不变）
-    data = resolve_slot(uid, slot_index)
-    history: list = data.get("history", [])
-    if req.index is None or req.index < 0 or req.index >= len(history):
-        error("invalid_index", f"消息索引 {req.index} 无效", 400)
-    target = history[req.index]
-    if not target.get("id"):
-        error("message_not_found", "无法定位消息 ID", 404)
-    if not mgr.update_message_content(uid, slot_index, target["id"], req.content):
-        error("message_not_found", f"消息 #{target['id']} 不存在", 404)
-    return {"ok": True}
 
 
 @router.patch("/api/slots/{slot_index}/title")
 def update_slot_title(slot_index: int, req: TitleUpdateRequest, user: dict = Depends(current_user)):
     """更新存档标题。"""
     uid = user["id"]
-    resolve_slot(uid, slot_index)
-    title = req.title.strip()
-    if not title:
-        error("empty_title", "标题不能为空", 400)
-    if not get_slot_mgr().update_slot_meta(uid, slot_index, {"title": title}):
-        error("update_failed", "标题更新失败", 500)
+    with slot_mutation_lock(uid, slot_index):
+        resolve_slot(uid, slot_index)
+        title = req.title.strip()
+        if not title:
+            error("empty_title", "标题不能为空", 400)
+        if not get_slot_mgr().update_slot_meta(uid, slot_index, {"title": title}):
+            error("update_failed", "标题更新失败", 500)
     return {"ok": True}
 
 
@@ -223,21 +225,22 @@ def update_slot_api_key(slot_index: int, req: ApiKeyUpdateRequest, user: dict = 
 def toggle_dual_mode(slot_index: int, req: DualToggleRequest, user: dict = Depends(current_user)):
     """切换双模型的回复模式。"""
     uid = user["id"]
-    data = resolve_slot(uid, slot_index)
-    dual_config = data.get("dual_config", {}) or {}
-    if not dual_config.get("enabled"):
-        error("not_dual_mode", "该存档不是双模型模式", 400)
+    with slot_mutation_lock(uid, slot_index):
+        data = resolve_slot(uid, slot_index)
+        dual_config = data.get("dual_config", {}) or {}
+        if not dual_config.get("enabled"):
+            error("not_dual_mode", "该存档不是双模型模式", 400)
 
-    if req.response_mode not in ("model1", "model2", "both"):
-        error("invalid_response_mode", "回复模式无效", 400)
-    if req.first_model not in ("model1", "model2"):
-        error("invalid_first_model", "先回复模型无效", 400)
+        if req.response_mode not in ("model1", "model2", "both"):
+            error("invalid_response_mode", "回复模式无效", 400)
+        if req.first_model not in ("model1", "model2"):
+            error("invalid_first_model", "先回复模型无效", 400)
 
-    dual_config["response_mode"] = req.response_mode
-    dual_config["first_model"] = req.first_model
-    if not get_slot_mgr().update_dual_config(uid, slot_index, dual_config):
-        error("update_failed", "回复模式更新失败", 500)
-    return {"ok": True, "dual_config": dual_config}
+        dual_config["response_mode"] = req.response_mode
+        dual_config["first_model"] = req.first_model
+        if not get_slot_mgr().update_dual_config(uid, slot_index, dual_config):
+            error("update_failed", "回复模式更新失败", 500)
+        return {"ok": True, "dual_config": dual_config}
 
 
 @router.patch("/api/slots/{slot_index}/config")
@@ -248,9 +251,14 @@ def update_slot_config(slot_index: int, req: UpdateSlotRequest, user: dict = Dep
     - 顶层字段 `model/system_prompt/api_key/params/model1_name` 仅作用于模型1（单模型即唯一模型）
     - `model2` 嵌套对象仅作用于模型2，切勿交叉覆盖
     """
+    uid = user["id"]
+    with slot_mutation_lock(uid, slot_index):
+        return _apply_slot_config(uid, slot_index, req)
+
+
+def _apply_slot_config(uid: int, slot_index: int, req: UpdateSlotRequest):
     import copy
 
-    uid = user["id"]
     data = resolve_slot(uid, slot_index)
     mgr = get_slot_mgr()
     dual_raw = data.get("dual_config", {}) or {}

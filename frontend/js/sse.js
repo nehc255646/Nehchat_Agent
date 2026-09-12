@@ -19,6 +19,8 @@ export const STREAM_ERROR_MESSAGES = {
   service_unavailable: "🛠️ 模型服务暂时不可用",
   permission_denied: "⛔ API 权限不足",
   slot_busy: "⏳ 该存档正在生成回复，请稍后重试",
+  nothing_to_continue: "✉️ 暂无可继续的回复",
+  too_many_attempts: "⏳ 尝试次数过多，请稍后再试",
   empty_message: "✉️ 消息不能为空",
   not_found: "❓ 接口或模型不存在，请检查基础 URL 与 model-id",
 };

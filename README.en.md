@@ -51,7 +51,7 @@ Frontend: Vite + vanilla JS. Backend: FastAPI + MySQL. One-click scripts to star
 - **10 independent slots**: each slot owns its own `model / system_prompt / params / dual_config` — run multiple conversations in parallel without interference
 - **6-step creation wizard**: mode → model → params → prompt → model 2 → model 2 params; creation is blocked while the catalog is empty
 - **Hot model swap**: `PATCH /api/slots/{i}/config` atomically updates model/prompt/params without touching history; both sides of a dual slot are fully independent
-- **Auto title**: generated from the system prompt after the first turn; rename in place from the sidebar
+- **Auto title**: generated from the user's first message after the first turn; rename in place from the sidebar
 
 ### 💬 Chat
 
@@ -72,7 +72,7 @@ Frontend: Vite + vanilla JS. Backend: FastAPI + MySQL. One-click scripts to star
 
 - **5 color themes**: Cosmic (default) / Emerald / Sunset / Sakura / Ocean — one-click switching
 - **Light & dark mode**: segmented toggle, follows system preference on first visit, persisted in localStorage
-- **Custom background**: upload / select / delete a global background with opacity and blur controls (≤10MB, jpg/png/webp/gif)
+- **Custom background**: upload / select / delete the current account's background with opacity and blur controls (≤10MB, jpg/png/webp/gif)
 
 ### 🔒 Reliability
 
@@ -190,7 +190,7 @@ A dual slot is driven by `dual_config`; each model has its own model, prompt, pa
 
 - The theme button in the top-right corner (on both the grid and chat views) opens the theme panel: a light/dark segmented toggle on top and 5 color themes below
 - The "Custom Background" section at the bottom of the panel: upload an image (≤10MB) or pick an existing one, and adjust opacity (0–100%) and blur (0–20px) in real time
-- Images are stored in `backend/backgrounds/`, served via the `/backgrounds` static mount; you can also drop files in manually
+- Uploads live in `backend/backgrounds/<user_id>/` and are served from `/backgrounds/{name}` after login; you can also drop shared, read-only images into `backend/backgrounds/`
 - All preferences (theme / mode / background) live in browser localStorage; an inline script applies them before first paint to avoid flashing
 
 ## 📂 Project Structure

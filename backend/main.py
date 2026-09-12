@@ -14,7 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from config import FRONTEND_DIR, ALLOWED_ORIGINS, BACKGROUNDS_DIR, WEB_USER, WEB_PASSWORD
+from config import FRONTEND_DIR, ALLOWED_ORIGINS, WEB_USER, WEB_PASSWORD
 from auth import BasicAuthMiddleware
 from accounts import AccountManager
 from clients import AIClient
@@ -23,7 +23,7 @@ from state import init as init_state
 from routes.slots import router as slots_router
 from routes.chat import router as chat_router
 from routes.models import router as models_router
-from routes.backgrounds import router as backgrounds_router
+from routes.backgrounds import router as backgrounds_router, file_router as backgrounds_file_router
 from routes.catalog import router as catalog_router
 from routes.auth import router as auth_router
 
@@ -92,15 +92,8 @@ app.include_router(chat_router)
 app.include_router(models_router)
 app.include_router(catalog_router)
 app.include_router(backgrounds_router)
+app.include_router(backgrounds_file_router)
 app.include_router(auth_router)
-
-# ── Serve background images ──
-# 静态挂载需在 / 前端挂载之前注册（/ 为兜底路由）
-if BACKGROUNDS_DIR.is_dir():
-    app.mount("/backgrounds", StaticFiles(directory=str(BACKGROUNDS_DIR)), name="backgrounds")
-    logger.info(f"已挂载背景图目录: {BACKGROUNDS_DIR}")
-else:
-    logger.warning(f"背景图目录不存在: {BACKGROUNDS_DIR}")
 
 
 # ── 全局异常处理器（返回结构化错误） ──
@@ -130,18 +123,16 @@ async def generic_exception_handler(request, exc: Exception):
 
 
 # ── Serve frontend static files ──
-# 优先使用 dist/（Vite 生产构建），其次使用 frontend/ 源文件
+# 只托管 Vite 生产构建产物，避免把源码或 node_modules 暴露出去
 dist_dir = FRONTEND_DIR / "dist"
-if dist_dir.is_dir() and list(dist_dir.iterdir()):
+if dist_dir.is_dir() and any(dist_dir.iterdir()):
     app.mount("/", StaticFiles(directory=str(dist_dir), html=True), name="frontend")
     logger.info(f"已挂载前端静态文件: {dist_dir}")
-elif FRONTEND_DIR.is_dir():
-    app.mount(
-        "/", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="frontend"
-    )
-    logger.info(f"已挂载前端开发文件: {FRONTEND_DIR}")
 else:
-    logger.warning(f"前端目录不存在: {FRONTEND_DIR}")
+    logger.error(
+        "未找到 frontend/dist，请先在 frontend 目录执行 npm run build；"
+        "开发时请使用 Vite（默认 5173）"
+    )
 
 
 if __name__ == "__main__":

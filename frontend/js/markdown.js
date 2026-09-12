@@ -3,6 +3,7 @@
  */
 import { marked } from "marked";
 import hljs from "highlight.js/lib/core";
+import { escapeHtml } from "./utils.js";
 
 import javascript from "highlight.js/lib/languages/javascript";
 import typescript from "highlight.js/lib/languages/typescript";
@@ -67,7 +68,7 @@ const DISALLOWED_TAGS = new Set([
 ]);
 
 const ALLOWED_ATTRS = new Set([
-  "class", "id", "title", "alt", "target", "rel", "width", "height",
+  "class", "title", "alt", "target", "rel", "width", "height",
   "dir", "lang", "start", "type", "value", "align", "role", "aria-hidden",
   "spellcheck", "data-language",
 ]);
@@ -86,15 +87,25 @@ function sanitizeHtml(html) {
       }
       for (const attr of [...child.attributes]) {
         const name = attr.name.toLowerCase();
-        const value = (attr.value || "").trim().toLowerCase();
-        if (name.startsWith("on") || name === "style") {
+        const value = (attr.value || "").trim();
+        const valueLow = value.toLowerCase();
+        if (name.startsWith("on") || name === "style" || name === "id") {
           child.removeAttribute(attr.name);
-        } else if (
-          (name === "href" || name === "src") &&
-          (value.startsWith("javascript:") || value.startsWith("vbscript:") ||
-           (value.startsWith("data:") && !value.startsWith("data:image/")))
-        ) {
-          child.removeAttribute(attr.name);
+        } else if (name === "href") {
+          const ok =
+            valueLow.startsWith("https://") ||
+            valueLow.startsWith("http://") ||
+            valueLow.startsWith("mailto:") ||
+            value.startsWith("#");
+          if (!ok) {
+            child.removeAttribute(attr.name);
+          } else if (child.getAttribute("target") === "_blank") {
+            child.setAttribute("rel", "noopener noreferrer");
+          }
+        } else if (name === "src") {
+          if (!valueLow.startsWith("https://") && !valueLow.startsWith("http://")) {
+            child.removeAttribute(attr.name);
+          }
         } else if (!ALLOWED_ATTRS.has(name)) {
           child.removeAttribute(attr.name);
         }
@@ -110,7 +121,7 @@ export function renderMarkdown(text) {
   try {
     return sanitizeHtml(marked.parse(text));
   } catch (_) {
-    return text.replace(/\n/g, "<br>");
+    return escapeHtml(text).replace(/\n/g, "<br>");
   }
 }
 

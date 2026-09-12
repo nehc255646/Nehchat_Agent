@@ -55,6 +55,10 @@ def verify_password(password: str, stored: str) -> bool:
         return False
 
 
+# 用户不存在时仍走一次相同耗时的哈希，避免按响应时间枚举用户名
+_DUMMY_PASSWORD_HASH = hash_password("__nehchat_dummy__")
+
+
 def validate_username(username: str) -> str:
     u = (username or "").strip()
     if not USERNAME_RE.match(u):
@@ -166,7 +170,9 @@ class AccountManager:
     def authenticate(self, username: str, password: str) -> Optional[dict]:
         """校验用户名密码，成功返回 {id, username}，失败返回 None。"""
         row = self.get_user_by_username(username)
-        if not row or not verify_password(password, row.get("password_hash") or ""):
+        stored = (row.get("password_hash") if row else "") or _DUMMY_PASSWORD_HASH
+        ok = verify_password(password, stored)
+        if not row or not ok:
             return None
         return {"id": row["id"], "username": row["username"]}
 

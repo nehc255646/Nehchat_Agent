@@ -3,11 +3,12 @@
  *
  * 设置持久化到 localStorage（ai_chat_background）：
  *   { enabled: boolean, url: string, opacity: 0-1, blur: px }
- * 背景图来源为后端 /backgrounds 静态目录（可手动放文件或弹层内上传）。
+ * 背景图按账号隔离，登录后由 /backgrounds 鉴权接口提供。
  */
 
 import { apiGet } from "./api.js";
 import { showToast } from "./toast.js";
+import { escapeHtml } from "./utils.js";
 
 const STORAGE_KEY = "ai_chat_background";
 const DEFAULTS = { enabled: false, url: "", opacity: 0.35, blur: 0 };
@@ -75,19 +76,24 @@ async function renderGallery() {
     return;
   }
   if (!items.length) {
-    grid.innerHTML = `<div class="bg-gallery-empty">暂无背景图，点击上方按钮上传，
-或手动放入 backend/backgrounds/ 目录</div>`;
+    grid.innerHTML = `<div class="bg-gallery-empty">暂无背景图，点击上方按钮上传</div>`;
     return;
   }
 
-  grid.innerHTML = items.map((it) => `
+  grid.innerHTML = items.map((it) => {
+    const name = escapeHtml(it.name);
+    const url = escapeHtml(it.url);
+    const del = it.shared
+      ? ""
+      : `<span class="bg-thumb-delete" data-bg-name="${name}" data-bg-url="${url}" title="删除">✕</span>`;
+    return `
     <button class="bg-thumb ${settings.url === it.url ? "selected" : ""}"
-            data-bg-url="${it.url}" data-bg-name="${it.name}" type="button"
-            title="${it.name}">
-      <img src="${it.url}" alt="${it.name}" loading="lazy">
-      <span class="bg-thumb-delete" data-bg-name="${it.name}" data-bg-url="${it.url}" title="删除">✕</span>
-    </button>
-  `).join("");
+            data-bg-url="${url}" data-bg-name="${name}" type="button"
+            title="${name}">
+      <img src="${url}" alt="${name}" loading="lazy">
+      ${del}
+    </button>`;
+  }).join("");
 }
 
 function syncControls() {

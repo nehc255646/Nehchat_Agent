@@ -536,6 +536,49 @@ class SlotManager:
             logger.error(f"delete_messages_after(user={user_id}, {slot_id}, {after_message_id}) 失败: {e}")
             return False
 
+    def list_messages_after(self, user_id: int, slot_id: int, after_message_id: int) -> List[Dict]:
+        """读取某条消息之后的全部消息（用于重新生成失败时写回）。"""
+        try:
+            with self._transaction() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        "SELECT id, role, content, source, created_at FROM messages "
+                        "WHERE user_id = %s AND slot_id = %s AND id > %s ORDER BY id ASC",
+                        (user_id, slot_id, after_message_id),
+                    )
+                    return list(cursor.fetchall() or [])
+        except pymysql.Error as e:
+            logger.error(f"list_messages_after(user={user_id}, {slot_id}, {after_message_id}) 失败: {e}")
+            return []
+
+    def restore_messages(self, user_id: int, slot_id: int, rows: List[Dict]) -> bool:
+        """按原 ID 写回消息快照。"""
+        if not rows:
+            return True
+        try:
+            with self._transaction() as conn:
+                with conn.cursor() as cursor:
+                    cursor.executemany(
+                        "INSERT INTO messages (id, slot_id, user_id, role, content, source, created_at) "
+                        "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                        [
+                            (
+                                r.get("id"),
+                                slot_id,
+                                user_id,
+                                r.get("role", ""),
+                                r.get("content", ""),
+                                r.get("source", ""),
+                                r.get("created_at") or "",
+                            )
+                            for r in rows
+                        ],
+                    )
+            return True
+        except pymysql.Error as e:
+            logger.error(f"restore_messages(user={user_id}, {slot_id}) 失败: {e}")
+            return False
+
     def delete_messages_by_ids(self, user_id: int, slot_id: int, message_ids: List[int]) -> bool:
         """按消息 ID 精确删除（用于删除中间一段消息，不改变其余消息 ID）。"""
         if not message_ids:
