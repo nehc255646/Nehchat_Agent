@@ -53,22 +53,20 @@ if %errorlevel% equ 0 (
     echo [3/4] Node.js not found, skipping frontend build
 )
 
-:: 4. Start server
+:: 4. Start server in this console. Closing the window stops uvicorn and its reload child.
 echo [4/4] Starting server...
 cd /d "%~dp0backend"
-
-:: Start the server in the background and record its PID.
-for /f "usebackq delims=" %%p in (`powershell -NoProfile -Command "$p = Start-Process -FilePath '%PY%' -ArgumentList '-m','uvicorn','main:app','--host','127.0.0.1','--port','8000','--reload' -WorkingDirectory '%~dp0backend' -WindowStyle Hidden -PassThru; $p.Id"`) do set SERVER_PID=%%p
-
-start http://localhost:8000
+start "" /min cmd /c "%SystemRoot%\System32\timeout.exe /t 3 >nul & start http://localhost:8000"
 
 echo ========================================
-echo   Server started.
-echo   Visit http://localhost:8000
+echo   Server started. Visit http://localhost:8000
+echo   Close this window to stop the service.
+echo ========================================
 
+"%PY%" -m uvicorn main:app --host 127.0.0.1 --port 8000 --reload --log-level info
+
+echo.
+echo Service stopped.
 pause
-
-:: Stop only the server process started by this script.
-if defined SERVER_PID taskkill /f /t /pid %SERVER_PID% >nul 2>&1
 endlocal
 

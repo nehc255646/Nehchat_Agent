@@ -136,9 +136,11 @@ export async function clearSlotChat() {
 
 // ── 发送消息（SSE 流式，JSON 请求） ──
 
-export async function sendMessage() {
+export async function sendMessage(opts = {}) {
+  if (opts instanceof Event) opts = {};
   const input = document.getElementById("message-input");
-  const text = input.value.trim();
+  const fromId = Number.isInteger(opts.fromId) ? opts.fromId : null;
+  const text = (opts.text ?? input.value).trim();
 
   if (!text || state.streaming) return;
   if (state.currentSlotIndex === null) return;
@@ -146,12 +148,19 @@ export async function sendMessage() {
   // 清理上一轮遗留的错误提示
   document.querySelectorAll("#chat-messages .message.error").forEach((el) => el.remove());
 
-  input.value = "";
-  input.style.height = "auto";
-
-  // 添加用户消息气泡
-  const userMsgBubble = addMessage("user", text, false);
-  const userMsgDiv = userMsgBubble ? userMsgBubble.closest(".message") : null;
+  let userMsgDiv = opts.userDiv || null;
+  if (!fromId) {
+    input.value = "";
+    input.style.height = "auto";
+    const userMsgBubble = addMessage("user", text, false);
+    userMsgDiv = userMsgBubble ? userMsgBubble.closest(".message") : null;
+  } else if (userMsgDiv) {
+    const bubble = userMsgDiv.querySelector(".bubble");
+    if (bubble) bubble.dataset.rawContent = text;
+    const contentDiv = bubble ? getContent(bubble) : null;
+    if (contentDiv) contentDiv.textContent = text;
+    userMsgDiv.dataset.messageId = String(fromId);
+  }
 
   setStreaming(true);
   state.abortController = new AbortController();
@@ -166,10 +175,12 @@ export async function sendMessage() {
   let userMessageId = null;
 
   try {
-    await postSse("/api/chat", {
+    const payload = {
       slot_index: state.currentSlotIndex,
       message: text,
-    }, (event) => {
+    };
+    if (fromId) payload.from_id = fromId;
+    await postSse("/api/chat", payload, (event) => {
       const { type, content, code } = event;
       switch (type) {
         case "model_start": {
@@ -296,9 +307,9 @@ export async function sendMessage() {
               if (d) d.remove();
               currentBubble = null;
             }
-            if (userMsgDiv) userMsgDiv.remove();
+            if (userMsgDiv && !fromId) userMsgDiv.remove();
           }
-          addErrorMessage(streamErrorText(code, content), hasCompleted ? null : text);
+          addErrorMessage(streamErrorText(code, content), (hasCompleted || fromId) ? null : text);
           break;
         }
       }
@@ -321,17 +332,17 @@ export async function sendMessage() {
         if (d) d.remove();
         currentBubble = null;
       }
-      if (userMsgDiv) userMsgDiv.remove();
-      addErrorMessage(`请求失败: ${e.message}`, text);
+      if (userMsgDiv && !fromId) userMsgDiv.remove();
+      addErrorMessage(`请求失败: ${e.message}`, fromId ? null : text);
     }
   } finally {
     // 手动取消（streamCancelled）与超时中断（aborted）都需回滚本轮气泡；
     // 手动取消时额外提示一次，超时已有独立提示
     if (state.streamCancelled) {
-      rollbackMessages(text);
+      rollbackMessages(text, { keepUser: !!fromId });
       showToast("已取消", "info");
     } else if (aborted) {
-      rollbackMessages(text);
+      rollbackMessages(text, { keepUser: !!fromId });
     }
   }
 
@@ -357,15 +368,19 @@ async function refreshSlotAfterStream({ gotDone, errorHandled, aborted }) {
   state.currentReader = null;
 }
 
-function rollbackMessages(text) {
+function rollbackMessages(text, { keepUser = false } = {}) {
   const allMsgs = document.querySelectorAll("#chat-messages > .message");
   const msgsToRemove = [];
   for (let i = allMsgs.length - 1; i >= Math.max(0, allMsgs.length - 5); i--) {
     const m = allMsgs[i];
-    if (m && (m.classList.contains("user") || m.classList.contains("assistant"))) {
+    if (m && m.classList.contains("assistant")) {
       msgsToRemove.push(m);
+      continue;
     }
-    if (m && m.classList.contains("user")) break;
+    if (m && m.classList.contains("user")) {
+      if (!keepUser) msgsToRemove.push(m);
+      break;
+    }
   }
   msgsToRemove.forEach(m => m?.remove());
   if (!document.querySelector("#chat-messages .message")) {
@@ -376,6 +391,7 @@ function rollbackMessages(text) {
         <div class="empty-desc">在下方输入消息，与 AI 开始交流</div>
       </div>`;
   }
+  if (keepUser) return;
   const msgInput = document.getElementById("message-input");
   if (msgInput) {
     msgInput.value = text;
@@ -615,24 +631,14 @@ export async function regenerate(userMsgId) {
     || userBubble.querySelector(".bubble-content")?.textContent
     || "";
 
-  try {
-    await apiDelete(`/api/slots/${state.currentSlotIndex}/chat/messages`, { from_id: userMsgId });
-  } catch (e) {
-    showToast("操作失败: " + e.message, "error");
-    return;
-  }
-
-  let current = userDiv;
+  let current = userDiv.nextElementSibling;
   while (current) {
     const next = current.nextElementSibling;
     current.remove();
     current = next;
   }
 
-  const input = document.getElementById("message-input");
-  input.value = userText;
-  input.style.height = "auto";
-  sendMessage();
+  sendMessage({ text: userText, fromId: userMsgId, userDiv });
 }
 
 // ── 取消流式回复 ──
@@ -720,25 +726,22 @@ export function editAndResend(msgElement) {
       return;
     }
 
-    try {
-      await apiDelete(`/api/slots/${state.currentSlotIndex}/chat/messages`, { from_id: messageId });
+    saveBtn.disabled = true;
+    cancelBtn.disabled = true;
 
-      let current = msgElement;
-      while (current) {
-        const next = current.nextElementSibling;
-        current.remove();
-        current = next;
-      }
+    bubble.classList.remove("editing");
+    contentDiv.textContent = newText;
+    bubble.dataset.rawContent = newText;
+    if (editBtn) editBtn.style.visibility = "";
 
-      const input = document.getElementById("message-input");
-      input.value = newText;
-      input.style.height = "auto";
-      input.style.height = input.scrollHeight + "px";
-      sendMessage();
-    } catch (e) {
-      showToast("编辑失败: " + e.message, "error");
-      cancelEdit(contentDiv, originalText, editBtn, bubble);
+    let current = msgElement.nextElementSibling;
+    while (current) {
+      const next = current.nextElementSibling;
+      current.remove();
+      current = next;
     }
+
+    sendMessage({ text: newText, fromId: messageId, userDiv: msgElement });
   };
 
   cancelBtn.onclick = () => {

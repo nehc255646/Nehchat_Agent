@@ -12,7 +12,14 @@ import time
 from typing import AsyncGenerator, Dict, List, Tuple
 
 import httpx
-from openai import AsyncOpenAI, APIError, APITimeoutError, RateLimitError
+from openai import (
+    AsyncOpenAI,
+    APIError,
+    APIConnectionError,
+    APIStatusError,
+    APITimeoutError,
+    RateLimitError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -210,17 +217,18 @@ class AIClient:
                 if tail:
                     yield tail
                 return
-            except (RateLimitError, APITimeoutError, APIError,
-                    httpx.TimeoutException, httpx.NetworkError) as e:
+            except (RateLimitError, APITimeoutError, APIConnectionError, APIStatusError,
+                    APIError, httpx.TimeoutException, httpx.NetworkError) as e:
                 if started:
                     logger.warning(f"流式响应已开始后中断（不重试，避免内容重复）: {e}")
                     raise AIClientError("回复生成中途中断，请重试", "stream_interrupted") from e
                 last_exception = e
+                status = getattr(e, "status_code", None)
 
                 if (
                     use_extra
-                    and isinstance(e, APIError)
-                    and getattr(e, "status_code", None) == 400
+                    and isinstance(e, APIStatusError)
+                    and status == 400
                     and self._looks_like_unknown_param(e)
                 ):
                     self._reject_thinking_extra(base_url)
@@ -228,7 +236,7 @@ class AIClient:
                     stripper = _ThinkStripper()
                     continue
 
-                if isinstance(e, RateLimitError) or getattr(e, "status_code", None) == 429:
+                if isinstance(e, RateLimitError) or status == 429:
                     logger.warning(f"API 速率限制 (尝试 {attempt + 1}): {e}")
                     if attempt < _API_RETRY_MAX:
                         await asyncio.sleep(_API_RETRY_DELAY * (2 ** attempt))
@@ -242,15 +250,21 @@ class AIClient:
                         continue
                     raise AIClientError("API 请求超时，请检查网络连接", "timeout") from e
 
-                if isinstance(e, APIError):
-                    status = e.status_code
+                if isinstance(e, (APIConnectionError, httpx.NetworkError)):
+                    logger.warning(f"网络错误 (尝试 {attempt + 1}): {e}")
+                    if attempt < _API_RETRY_MAX:
+                        await asyncio.sleep(_API_RETRY_DELAY * (2 ** attempt))
+                        continue
+                    raise AIClientError(f"网络连接失败，请检查网络: {e}", "network_error") from e
+
+                if isinstance(e, APIStatusError):
                     if status == 401:
                         raise AIClientError("API 认证失败，请到「模型配置」检查该供应商的密钥", "auth_failed") from e
                     if status == 403:
                         raise AIClientError("API 权限不足，请检查账户权限", "permission_denied") from e
                     if status == 404:
                         raise AIClientError("接口或模型不存在，请检查基础 URL 与 model-id", "not_found") from e
-                    if status >= 500:
+                    if status is not None and status >= 500:
                         logger.error(f"API 服务错误 (尝试 {attempt + 1}): {e}")
                         if attempt < _API_RETRY_MAX:
                             await asyncio.sleep(_API_RETRY_DELAY * (2 ** attempt))
@@ -258,11 +272,11 @@ class AIClient:
                         raise AIClientError(f"API 服务暂时不可用 ({status})", "service_unavailable") from e
                     raise AIClientError(f"API 请求被拒绝 ({status})", "request_failed") from e
 
-                logger.warning(f"网络错误 (尝试 {attempt + 1}): {e}")
+                logger.warning(f"API 请求失败 (尝试 {attempt + 1}): {e}")
                 if attempt < _API_RETRY_MAX:
                     await asyncio.sleep(_API_RETRY_DELAY * (2 ** attempt))
                     continue
-                raise AIClientError(f"网络连接失败，请检查网络: {e}", "network_error") from e
+                raise AIClientError(f"API 请求失败: {e}", "request_failed") from e
 
         raise AIClientError(
             f"API 请求失败 (已重试 {_API_RETRY_MAX} 次): {last_exception}",
@@ -286,7 +300,7 @@ class AIClient:
                 if use_extra:
                     kwargs["extra_body"] = dict(_THINKING_OFF_EXTRA)
                 resp = await client.chat.completions.create(**kwargs)
-            except APIError as e:
+            except APIStatusError as e:
                 if use_extra and e.status_code == 400 and self._looks_like_unknown_param(e):
                     self._reject_thinking_extra(base_url)
                     resp = await client.chat.completions.create(**payload)
@@ -304,7 +318,9 @@ class AIClient:
             return {"ok": False, "error": f"速率限制: {e}"}
         except (APITimeoutError, httpx.TimeoutException):
             return {"ok": False, "error": "请求超时，请检查网络或基础 URL"}
-        except APIError as e:
+        except APIConnectionError as e:
+            return {"ok": False, "error": f"网络连接失败: {e}"}
+        except APIStatusError as e:
             status = e.status_code
             if status == 401:
                 return {"ok": False, "error": "认证失败，请检查 API 密钥"}

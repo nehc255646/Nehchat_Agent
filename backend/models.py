@@ -13,6 +13,8 @@ from pydantic import BaseModel, Field
 class ChatRequest(BaseModel):
     slot_index: int
     message: str = Field(default="", max_length=200_000)
+    # 从此用户消息重开：更新正文、删除其后回复，不再插入新的用户消息
+    from_id: Optional[int] = None
 
 
 class GenerationParams(BaseModel):

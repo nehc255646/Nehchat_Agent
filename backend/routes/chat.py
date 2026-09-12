@@ -158,14 +158,18 @@ async def _stream_dual_turn(
     history: list,
     user_content: str,
     persist_user: bool = True,
+    inject_user: bool | None = None,
+    existing_user_id: int | None = None,
     error_ref_key: str = "user_message_id",
 ) -> AsyncGenerator[str, None]:
     """双模型（或按 response_mode 单侧）回复一轮，产出 SSE 事件。
 
     persist_user=True：先把用户消息落库（普通发消息），回滚起点 = 用户消息 ID；
-    persist_user=False：用户消息只进入内存上下文（继续回复），不落库，
-    回滚起点 = 本轮第一条已保存的 assistant 消息。
+    persist_user=False：不落库用户消息。inject_user 默认 True（继续回复把引导词
+    只注入内存）；编辑/重开时 inject_user=False，历史里已有该条用户消息。
     """
+    if inject_user is None:
+        inject_user = not persist_user
     dual_config = data.get("dual_config", {}) or {}
     model = data.get("model") or ""
     system_prompt = data.get("system_prompt", "使用中文回答")
@@ -178,7 +182,7 @@ async def _stream_dual_turn(
     run_model1 = response_mode in ("model1", "both")
     run_model2 = response_mode in ("model2", "both")
 
-    user_msg_id = None
+    user_msg_id = existing_user_id
     msg_ids = []
     rollback_start_id = None
     completed = False
@@ -195,9 +199,11 @@ async def _stream_dual_turn(
             user_msg_id = saved_ids[0] if saved_ids else None
             if saved_ids:
                 rollback_start_id = saved_ids[0]
-
-        # 用户消息加入内存上下文（继续回复时不落库，仅本次生成可见）
-        history.append({"role": "user", "content": user_content})
+            history.append({"role": "user", "content": user_content})
+        elif inject_user:
+            history.append({"role": "user", "content": user_content})
+        else:
+            user_msg_id = existing_user_id
 
         # 决定模型顺序
         model_order = ["model1", "model2"]
@@ -365,7 +371,7 @@ async def _stream_dual_turn(
 async def chat(req: ChatRequest):
     """流式对话 — 接收 JSON，返回 SSE 流式响应。"""
     user_content = (req.message or "").strip()
-    if not user_content:
+    if not user_content and not req.from_id:
         error("empty_message", "消息不能为空", 400)
 
     data = await _db_call(resolve_slot, req.slot_index)
@@ -398,16 +404,64 @@ async def chat(req: ChatRequest):
     async def stream():
         completed = False
         rollback_start_id = None
+        persist_user = True
+        inject_user = True
+        local_history = list(history)
+        local_content = user_content
+        user_msg_id = None
+        msg_ids = []
 
         try:
-            user_msg_id = None
-            msg_ids = []
+            # 锁内重新读取，避免删/写之间用到过期历史
+            fresh = await _db_call(resolve_slot, req.slot_index)
+            local_history = list(fresh.get("history") or [])
+
+            if req.from_id:
+                target = next(
+                    (m for m in local_history if int(m.get("id") or 0) == int(req.from_id)),
+                    None,
+                )
+                if not target or target.get("role") != "user":
+                    yield _sse({
+                        "type": "error",
+                        "code": "invalid_message_id",
+                        "content": "只能从一条用户消息重新生成",
+                    })
+                    return
+                local_content = local_content or (target.get("content") or "").strip()
+                if not local_content:
+                    yield _sse({
+                        "type": "error",
+                        "code": "empty_message",
+                        "content": "消息不能为空",
+                    })
+                    return
+                if local_content != (target.get("content") or ""):
+                    updated = await _db_call(
+                        get_slot_mgr().update_message_content,
+                        req.slot_index, req.from_id, local_content,
+                    )
+                    if not updated:
+                        raise RuntimeError("更新用户消息失败")
+                if not await _db_call(
+                    get_slot_mgr().delete_messages_after, req.slot_index, req.from_id,
+                ):
+                    raise RuntimeError("删除后续消息失败")
+                local_history = [
+                    m for m in local_history if int(m.get("id") or 0) <= int(req.from_id)
+                ]
+                for m in local_history:
+                    if int(m.get("id") or 0) == int(req.from_id):
+                        m["content"] = local_content
+                persist_user = False
+                inject_user = False
+                user_msg_id = req.from_id
 
             # ── 单模型模式 ──
             if not dual_enabled or (not run_model1 and not run_model2):
                 # 退化为单模型（未开启双模型，或双模型无有效回复模式）
-                # 在内存中追加用户消息（单模型路径）
-                history.append({"role": "user", "content": user_content})
+                if persist_user:
+                    local_history.append({"role": "user", "content": local_content})
                 actual_model = model
                 actual_prompt = system_prompt
                 actual_params = params
@@ -415,19 +469,19 @@ async def chat(req: ChatRequest):
                 rt = get_runtime(actual_model, http=False)
                 max_tokens = rt.get("max_tokens")
 
-                context_history = _truncate_history(history)
+                context_history = _truncate_history(local_history)
                 messages = [{"role": "system", "content": actual_prompt}, *_clean(context_history)]
 
                 chunks = []
-                # 先保存用户消息，拿到 ID
-                saved_ids = await _db_call(get_slot_mgr().append_messages, req.slot_index, [
-                    {"role": "user", "content": user_content},
-                ])
-                if not saved_ids:
-                    raise RuntimeError("数据库写入用户消息失败")
-                user_msg_id = saved_ids[0] if saved_ids else None
-                if rollback_start_id is None and saved_ids:
-                    rollback_start_id = saved_ids[0]
+                if persist_user:
+                    saved_ids = await _db_call(get_slot_mgr().append_messages, req.slot_index, [
+                        {"role": "user", "content": local_content},
+                    ])
+                    if not saved_ids:
+                        raise RuntimeError("数据库写入用户消息失败")
+                    user_msg_id = saved_ids[0] if saved_ids else None
+                    if rollback_start_id is None and saved_ids:
+                        rollback_start_id = saved_ids[0]
 
                 async for chunk in get_ai_client().stream_chat(
                     messages,
@@ -446,12 +500,12 @@ async def chat(req: ChatRequest):
                 ])
                 if not msg_ids:
                     raise RuntimeError("数据库写入模型回复失败")
-                history.append({"role": "assistant", "content": full_response})
+                local_history.append({"role": "assistant", "content": full_response})
 
-                if not data.get("title", ""):
+                if persist_user and not fresh.get("title", ""):
                     if not await _db_call(
                         get_slot_mgr().update_slot_meta,
-                        req.slot_index, {"title": _auto_title(req.slot_index, user_content)}
+                        req.slot_index, {"title": _auto_title(req.slot_index, local_content)}
                     ):
                         logger.warning(f"自动更新存档 #{req.slot_index + 1} 标题失败")
 
@@ -466,8 +520,11 @@ async def chat(req: ChatRequest):
 
             # ── 双模型模式（共享助手：自行落库、发事件、处理错误与回滚） ──
             gen = _stream_dual_turn(
-                req.slot_index, data, history, user_content,
-                persist_user=True, error_ref_key="user_message_id",
+                req.slot_index, fresh, local_history, local_content,
+                persist_user=persist_user,
+                inject_user=inject_user,
+                existing_user_id=user_msg_id,
+                error_ref_key="user_message_id",
             )
             try:
                 async for event in gen:

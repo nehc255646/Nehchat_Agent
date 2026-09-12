@@ -397,6 +397,24 @@ class SlotManager:
             logger.error(f"delete_messages_from({slot_id}, {from_message_id}) 失败: {e}")
             return False
 
+    def delete_messages_after(self, slot_id: int, after_message_id: int) -> bool:
+        """删除某条消息之后的全部消息，保留该条本身。"""
+        try:
+            with self._transaction() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        "DELETE FROM messages WHERE slot_id = %s AND id > %s",
+                        (slot_id, after_message_id),
+                    )
+                    cursor.execute(
+                        "UPDATE slots SET updated_at = %s WHERE id = %s",
+                        (self._now(), slot_id),
+                    )
+            return True
+        except pymysql.Error as e:
+            logger.error(f"delete_messages_after({slot_id}, {after_message_id}) 失败: {e}")
+            return False
+
     def delete_messages_by_ids(self, slot_id: int, message_ids: List[int]) -> bool:
         """按消息 ID 精确删除（用于删除中间一段消息，不改变其余消息 ID）。"""
         if not message_ids:
