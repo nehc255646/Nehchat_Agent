@@ -129,7 +129,14 @@ def setup(request: Request, response: Response, req: SetupRequest):
     if not _is_local_request(request):
         error("local_only", "首次初始化仅允许在本机浏览器完成", 403)
 
-    user = _create_account_or_error(req.username, req.password)
+    try:
+        user = mgr.create_user(req.username, req.password, is_admin=True)
+    except ValueError as e:
+        if str(e) == "duplicate":
+            error("duplicate_user", "用户名已存在", 409)
+        error("invalid_account", str(e), 400)
+    except RuntimeError as e:
+        error("create_failed", str(e), 500)
     try:
         mgr.claim_legacy_data(user["id"])
     except Exception as e:

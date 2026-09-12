@@ -26,6 +26,19 @@ class LoginRequest(BaseModel):
     password: str = Field(min_length=1, max_length=128)
 
 
+class AdminCreateUserRequest(BaseModel):
+    """管理员创建账号。"""
+    username: str = Field(min_length=1, max_length=32)
+    password: str = Field(min_length=1, max_length=128)
+    is_admin: bool = False
+
+
+class AdminUpdateUserRequest(BaseModel):
+    """管理员更新账号：重置密码或调整管理员身份。"""
+    password: Optional[str] = Field(default=None, max_length=128)
+    is_admin: Optional[bool] = None
+
+
 class ChatRequest(BaseModel):
     slot_index: int
     message: str = Field(default="", max_length=200_000)

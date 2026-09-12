@@ -40,6 +40,7 @@ async def _db_call(method, *args):
 async def _locked_stream(user_id: int, slot_index: int, source):
     lock = _slot_lock(user_id, slot_index)
     acquired = False
+    lock_conn = None
     try:
         try:
             await asyncio.wait_for(lock.acquire(), timeout=0.05)
@@ -51,30 +52,32 @@ async def _locked_stream(user_id: int, slot_index: int, source):
                 "content": "该存档正在生成回复，请稍后重试",
             })
             return
-        lock_conn = None
-        try:
-            lock_conn = await _db_call(get_slot_mgr().acquire_slot_lock, user_id, slot_index)
-            if lock_conn is None:
-                yield _sse({
-                    "type": "error",
-                    "code": "slot_busy",
-                    "content": "该存档正在生成回复，请稍后重试",
-                })
-                return
-            async for event in source:
-                yield event
-        finally:
-            if lock_conn is not None:
-                await _db_call(get_slot_mgr().release_slot_lock, lock_conn, user_id, slot_index)
+
+        lock_conn = await _db_call(get_slot_mgr().acquire_slot_lock, user_id, slot_index)
+        if lock_conn is None:
+            yield _sse({
+                "type": "error",
+                "code": "slot_busy",
+                "content": "该存档正在生成回复，请稍后重试",
+            })
+            return
+
+        async for event in source:
+            yield event
     finally:
-        if acquired:
-            lock.release()
         aclose = getattr(source, "aclose", None)
         if callable(aclose):
             try:
                 await aclose()
             except Exception:
-                pass
+                logger.warning("关闭对话流时出错", exc_info=True)
+        if lock_conn is not None:
+            try:
+                await _db_call(get_slot_mgr().release_slot_lock, lock_conn, user_id, slot_index)
+            except Exception:
+                logger.warning("释放存档锁时出错", exc_info=True)
+        if acquired:
+            lock.release()
 
 # ── 固定图标 ──
 MODEL1_ICON = "🎭"

@@ -26,6 +26,7 @@ from routes.models import router as models_router
 from routes.backgrounds import router as backgrounds_router, file_router as backgrounds_file_router
 from routes.catalog import router as catalog_router
 from routes.auth import router as auth_router
+from routes.admin import router as admin_router
 
 # ── Logging ──
 
@@ -94,6 +95,7 @@ app.include_router(catalog_router)
 app.include_router(backgrounds_router)
 app.include_router(backgrounds_file_router)
 app.include_router(auth_router)
+app.include_router(admin_router)
 
 
 # ── 全局异常处理器（返回结构化错误） ──

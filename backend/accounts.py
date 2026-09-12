@@ -90,9 +90,16 @@ class AccountManager:
                         id INT AUTO_INCREMENT PRIMARY KEY,
                         username VARCHAR(32) NOT NULL UNIQUE,
                         password_hash VARCHAR(256) NOT NULL,
+                        is_admin TINYINT(1) NOT NULL DEFAULT 0,
                         created_at VARCHAR(32) DEFAULT ''
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
                 """)
+                cursor.execute("SHOW COLUMNS FROM `users` LIKE 'is_admin'")
+                if not cursor.fetchone():
+                    cursor.execute(
+                        "ALTER TABLE `users` ADD COLUMN `is_admin` TINYINT(1) NOT NULL DEFAULT 0 AFTER `password_hash`"
+                    )
+                    logger.info("已添加 users.is_admin 列")
                 cursor.execute("""
                     CREATE TABLE IF NOT EXISTS sessions (
                         token CHAR(64) PRIMARY KEY,
@@ -103,6 +110,7 @@ class AccountManager:
                         INDEX idx_sessions_user (user_id)
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
                 """)
+                self._ensure_admin(cursor)
             conn.commit()
             logger.info("用户与会话表初始化完成")
         except pymysql.Error as e:
@@ -116,6 +124,31 @@ class AccountManager:
     def _now() -> datetime.datetime:
         return datetime.datetime.now()
 
+    @staticmethod
+    def _ensure_admin(cursor) -> None:
+        """若尚无管理员，将最早创建的账号提升为管理员。"""
+        cursor.execute("SELECT COUNT(*) AS c FROM users WHERE is_admin = 1")
+        if (cursor.fetchone() or {}).get("c", 0) > 0:
+            return
+        cursor.execute("SELECT id FROM users ORDER BY id ASC LIMIT 1")
+        row = cursor.fetchone()
+        if not row:
+            return
+        cursor.execute("UPDATE users SET is_admin = 1 WHERE id = %s", (row["id"],))
+        logger.info(f"已将最早账号 #{row['id']} 设为管理员")
+
+    @staticmethod
+    def public_user(row: dict, *, include_meta: bool = False) -> dict:
+        data = {
+            "id": int(row["id"]),
+            "username": row["username"],
+            "is_admin": bool(row.get("is_admin")),
+        }
+        if include_meta:
+            data["created_at"] = row.get("created_at") or ""
+            data["slot_count"] = int(row.get("slot_count") or 0)
+        return data
+
     def has_users(self) -> bool:
         conn = self.pool.connection()
         try:
@@ -125,20 +158,21 @@ class AccountManager:
         finally:
             conn.close()
 
-    def create_user(self, username: str, password: str) -> dict:
+    def create_user(self, username: str, password: str, is_admin: bool = False) -> dict:
         """创建账号；用户名重复时抛出 ValueError("duplicate")。"""
         u = validate_username(username)
         p = validate_password(password)
+        admin_flag = 1 if is_admin else 0
         conn = self.pool.connection()
         try:
             with conn.cursor() as cursor:
                 cursor.execute(
-                    "INSERT INTO users (username, password_hash, created_at) VALUES (%s, %s, %s)",
-                    (u, hash_password(p), self._now().isoformat()),
+                    "INSERT INTO users (username, password_hash, is_admin, created_at) VALUES (%s, %s, %s, %s)",
+                    (u, hash_password(p), admin_flag, self._now().isoformat()),
                 )
                 user_id = cursor.lastrowid
             conn.commit()
-            return {"id": user_id, "username": u}
+            return {"id": user_id, "username": u, "is_admin": bool(is_admin)}
         except pymysql.IntegrityError:
             conn.rollback()
             raise ValueError("duplicate")
@@ -154,7 +188,7 @@ class AccountManager:
         try:
             with conn.cursor() as cursor:
                 cursor.execute(
-                    f"SELECT id, username, password_hash FROM users WHERE {where} = %s",
+                    f"SELECT id, username, password_hash, is_admin, created_at FROM users WHERE {where} = %s",
                     (value,),
                 )
                 return cursor.fetchone()
@@ -174,7 +208,7 @@ class AccountManager:
         ok = verify_password(password, stored)
         if not row or not ok:
             return None
-        return {"id": row["id"], "username": row["username"]}
+        return self.public_user(row)
 
     def create_session(self, user_id: int) -> str:
         token = secrets.token_urlsafe(32)
@@ -204,7 +238,7 @@ class AccountManager:
         try:
             with conn.cursor() as cursor:
                 cursor.execute(
-                    "SELECT s.user_id, s.expires_at, u.username "
+                    "SELECT s.user_id, s.expires_at, u.username, u.is_admin "
                     "FROM sessions s JOIN users u ON u.id = s.user_id "
                     "WHERE s.token = %s",
                     (token,),
@@ -220,7 +254,11 @@ class AccountManager:
                     cursor.execute("DELETE FROM sessions WHERE token = %s", (token,))
                     conn.commit()
                     return None
-                return {"id": row["user_id"], "username": row["username"]}
+                return {
+                    "id": row["user_id"],
+                    "username": row["username"],
+                    "is_admin": bool(row.get("is_admin")),
+                }
         finally:
             conn.close()
 
@@ -235,6 +273,112 @@ class AccountManager:
         except pymysql.Error as e:
             conn.rollback()
             logger.warning(f"删除会话失败: {e}")
+        finally:
+            conn.close()
+
+    def list_users(self) -> list[dict]:
+        """列出全部账号（不含密码），附带各账号存档数量。"""
+        conn = self.pool.connection()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    "SELECT u.id, u.username, u.is_admin, u.created_at, "
+                    "(SELECT COUNT(*) FROM slots s WHERE s.user_id = u.id) AS slot_count "
+                    "FROM users u ORDER BY u.is_admin DESC, u.id ASC"
+                )
+                return [self.public_user(row, include_meta=True) for row in (cursor.fetchall() or [])]
+        finally:
+            conn.close()
+
+    def count_admins(self) -> int:
+        conn = self.pool.connection()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT COUNT(*) AS c FROM users WHERE is_admin = 1")
+                return int((cursor.fetchone() or {}).get("c", 0) or 0)
+        finally:
+            conn.close()
+
+    def set_password(self, user_id: int, password: str) -> bool:
+        p = validate_password(password)
+        conn = self.pool.connection()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    "UPDATE users SET password_hash = %s WHERE id = %s",
+                    (hash_password(p), user_id),
+                )
+                updated = cursor.rowcount > 0
+            conn.commit()
+            return updated
+        except pymysql.Error as e:
+            conn.rollback()
+            logger.error(f"更新密码失败: {e}")
+            raise RuntimeError(f"更新密码失败: {e}")
+        finally:
+            conn.close()
+
+    def set_admin(self, user_id: int, is_admin: bool) -> bool:
+        """切换管理员身份；撤销时若已是最后一位管理员则抛出 ValueError("last_admin")。"""
+        conn = self.pool.connection()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    "SELECT id, is_admin FROM users WHERE id = %s",
+                    (user_id,),
+                )
+                row = cursor.fetchone()
+                if not row:
+                    return False
+                currently_admin = bool(row.get("is_admin"))
+                if currently_admin and not is_admin:
+                    cursor.execute("SELECT COUNT(*) AS c FROM users WHERE is_admin = 1")
+                    if int((cursor.fetchone() or {}).get("c", 0) or 0) <= 1:
+                        raise ValueError("last_admin")
+                cursor.execute(
+                    "UPDATE users SET is_admin = %s WHERE id = %s",
+                    (1 if is_admin else 0, user_id),
+                )
+            conn.commit()
+            return True
+        except ValueError:
+            conn.rollback()
+            raise
+        except pymysql.Error as e:
+            conn.rollback()
+            logger.error(f"更新管理员身份失败: {e}")
+            raise RuntimeError(f"更新管理员身份失败: {e}")
+        finally:
+            conn.close()
+
+    def delete_user_sessions(self, user_id: int) -> None:
+        conn = self.pool.connection()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute("DELETE FROM sessions WHERE user_id = %s", (user_id,))
+            conn.commit()
+        except pymysql.Error as e:
+            conn.rollback()
+            logger.warning(f"清理用户会话失败: {e}")
+        finally:
+            conn.close()
+
+    def delete_user(self, user_id: int) -> bool:
+        """删除账号及其存档、供应商与会话。"""
+        conn = self.pool.connection()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute("DELETE FROM messages WHERE user_id = %s", (user_id,))
+                cursor.execute("DELETE FROM slots WHERE user_id = %s", (user_id,))
+                cursor.execute("DELETE FROM providers WHERE user_id = %s", (user_id,))
+                cursor.execute("DELETE FROM users WHERE id = %s", (user_id,))
+                deleted = cursor.rowcount > 0
+            conn.commit()
+            return deleted
+        except pymysql.Error as e:
+            conn.rollback()
+            logger.error(f"删除用户失败: {e}")
+            raise RuntimeError(f"删除用户失败: {e}")
         finally:
             conn.close()
 

@@ -7,6 +7,18 @@
     gap: 18px;
     padding: 0 24px 36px;
   }
+
+  .slot-header-toolbar {
+    position: relative;
+    top: auto;
+    right: auto;
+    width: 100%;
+    max-width: none;
+    justify-content: flex-end;
+  }
+  #slot-header {
+    padding: 16px 20px 28px;
+  }
 }
 
 @media (max-width: 900px) {
@@ -17,9 +29,13 @@
   }
 }
 
-/* 平板竖屏 */
+/* 平板竖屏 / 手机 */
 @media (max-width: 768px) {
   #sidebar-toggle {
+    display: flex;
+  }
+
+  .sidebar-close-btn {
     display: flex;
   }
 
@@ -29,25 +45,45 @@
     top: 0;
     bottom: 0;
     transform: translateX(-100%);
-    width: min(320px, 85vw);
+    width: min(300px, 82vw);
+    min-width: 0;
+    max-width: 82vw;
+    padding-top: env(safe-area-inset-top, 0px);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+    background: var(--bg-secondary);
     box-shadow: 4px 0 40px rgba(0, 0, 0, 0.6);
-    z-index: 99;
+    z-index: 200;
   }
   #sidebar.open {
     transform: translateX(0);
+  }
+  .sidebar-overlay {
+    z-index: 150;
   }
   .sidebar-overlay.active {
     display: block;
   }
 
+  .slot-header-toolbar {
+    position: relative;
+    top: auto;
+    right: auto;
+    width: 100%;
+    max-width: none;
+    padding: 0 0 8px;
+    justify-content: flex-end;
+  }
+
   #slot-grid {
     grid-template-columns: repeat(2, 1fr);
     gap: 16px;
-    padding: 0 16px 28px;
+    padding: 0 16px max(28px, env(safe-area-inset-bottom, 0px));
   }
 
   #slot-header {
-    padding: 28px 16px 24px;
+    padding: calc(10px + env(safe-area-inset-top, 0px)) 16px 20px;
+    background: var(--bg-secondary);
+    border-bottom: 1px solid var(--glass-border);
   }
   .slot-header-title {
     font-size: 20px;
@@ -59,27 +95,21 @@
   }
 
   .help-btn-top {
-    top: 14px;
-    right: 12px;
-    padding: 5px 14px;
+    padding: 6px 12px;
     font-size: 12px;
+    min-height: 40px;
+    background: var(--bg-surface-hover);
+    border-color: var(--border-strong);
+    color: var(--text-primary);
   }
 
-  #import-backup-slot-btn {
-    right: 96px;
+  #current-model-badge {
+    display: none;
   }
 
-  #theme-btn-slot {
-    right: 208px;
-  }
-
-  #catalog-btn-slot {
-    right: 310px;
-    padding: 5px 10px;
-  }
-
-  #logout-btn-slot {
-    right: 412px;
+  #logout-btn-chat,
+  #admin-btn-chat {
+    display: none;
   }
 
   #chat-messages {
@@ -90,10 +120,67 @@
     max-width: 92%;
   }
   #chat-header {
-    padding: 12px 16px;
+    padding: calc(10px + env(safe-area-inset-top, 0px)) 12px 10px;
+    gap: 8px;
+    background: var(--bg-secondary);
+    border-bottom: 1px solid var(--border-strong);
+  }
+  .header-actions {
+    gap: 4px;
+  }
+  .icon-btn {
+    background: var(--bg-surface-hover);
+    border-color: var(--border-strong);
+    color: var(--text-primary);
   }
   #input-area {
-    padding: 10px 14px 14px;
+    padding: 10px 14px max(14px, env(safe-area-inset-bottom, 0px));
+    background: var(--bg-secondary);
+  }
+
+  #message-input,
+  .auth-input,
+  .title-input,
+  .edit-textarea,
+  .create-input {
+    font-size: 16px;
+  }
+
+  .continue-label {
+    display: none;
+  }
+  .continue-btn {
+    padding: 0 10px;
+    min-width: 40px;
+  }
+
+  .input-wrapper {
+    padding: 6px 6px 6px 14px;
+  }
+
+  .auth-view {
+    padding: 16px;
+    padding-top: max(16px, env(safe-area-inset-top));
+    padding-bottom: max(16px, env(safe-area-inset-bottom));
+    align-items: flex-start;
+    overflow-y: auto;
+  }
+  .auth-card {
+    margin: auto 0;
+  }
+}
+
+/* 无悬停设备：操作按钮常显 */
+@media (hover: none) {
+  .slot-card.used .slot-delete-btn {
+    opacity: 1;
+  }
+  .message .regenerate-btn,
+  .message .user-edit-btn {
+    opacity: 1;
+  }
+  .message.assistant:last-of-type .regenerate-btn {
+    opacity: 1;
   }
 }
 
@@ -102,42 +189,68 @@
   #slot-grid {
     grid-template-columns: repeat(2, 1fr);
     gap: 12px;
-    padding: 0 12px 24px;
+    padding: 0 12px max(24px, env(safe-area-inset-bottom));
   }
 
-  /* 顶部按钮排布收紧 + 注销移到第二行，避免重叠与溢出 */
-  #import-backup-slot-btn {
-    right: 90px;
-  }
-
-  #theme-btn-slot {
-    right: 186px;
-  }
-
-  #catalog-btn-slot {
-    right: 268px;
-    padding: 5px 10px;
-  }
-
-  #logout-btn-slot {
-    top: 52px;
-    right: 12px;
-  }
-
-  /* 聊天页顶部：手机隐藏模型徽标，避免与图标按钮重叠（模型信息在侧栏可见） */
-  #current-model-badge {
+  .toolbar-label {
     display: none;
   }
+  .help-btn-top {
+    min-width: 40px;
+    min-height: 40px;
+    padding: 8px 10px;
+    justify-content: center;
+  }
 
-  /* 模型配置弹层：手机端上下堆叠，供应商列表变横向滚动条 */
+  .slot-card {
+    min-height: 160px;
+    padding: 16px 12px;
+  }
+
+  #slot-header {
+    padding: calc(8px + env(safe-area-inset-top, 0px)) 12px 16px;
+  }
+  .slot-header-title {
+    font-size: 18px;
+  }
+  .slot-header-icon {
+    width: 52px;
+    height: 52px;
+    font-size: 22px;
+  }
+
+  .message {
+    max-width: 96%;
+  }
+  .message .bubble {
+    padding: 12px 14px;
+    font-size: 14px;
+  }
+  .message .avatar {
+    width: 28px;
+    height: 28px;
+    font-size: 13px;
+  }
+  #chat-messages {
+    padding: 12px 10px;
+    gap: 14px;
+  }
+
+  .icon-btn,
+  .header-action-btn {
+    width: 40px;
+    height: 40px;
+  }
+
+  /* 模型配置弹层：上下堆叠，供应商列表横向滚动 */
   .catalog-modal-content {
-    width: calc(100vw - 16px);
-    max-height: 92vh;
+    width: calc(100% - 16px);
+    max-height: min(92vh, 92dvh);
   }
   .catalog-layout {
     flex-direction: column;
     min-height: 0;
-    max-height: calc(92vh - 56px);
+    max-height: calc(min(92vh, 92dvh) - 56px);
   }
   .catalog-sidebar {
     width: 100%;
@@ -160,6 +273,7 @@
     gap: 8px;
     flex: 1;
     overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
   }
   .catalog-provider-item {
     width: auto;
@@ -179,7 +293,6 @@
     gap: 12px;
   }
 
-  /* 创建向导：手机端隐藏步骤文字，仅保留数字，避免指示器横向溢出 */
   .wizard-step-label {
     display: none;
   }
@@ -190,40 +303,33 @@
     width: 14px;
     margin: 0 5px;
   }
-  .slot-card {
-    min-height: 160px;
-    padding: 16px 12px;
+  .admin-create-form {
+    grid-template-columns: 1fr;
+  }
+  .admin-user-row {
+    flex-direction: column;
+  }
+  .admin-user-actions {
+    width: 100%;
+    justify-content: flex-start;
   }
 
-  #slot-header {
-    padding: 24px 12px 20px;
+  .wizard-content,
+  .theme-modal-content,
+  .help-modal-content,
+  .modal-content {
+    width: calc(100% - 16px);
+    max-width: none;
   }
-  .slot-header-title {
-    font-size: 18px;
-  }
-  .slot-header-icon {
-    width: 52px;
-    height: 52px;
-    font-size: 22px;
-  }
-
-  .message {
-    max-width: 96%;
-  }
-  .message .bubble {
-    padding: 12px 14px;
-    font-size: 14px;
-  }
-  #chat-messages {
-    padding: 12px 10px;
-    gap: 14px;
-  }
-
   .wizard-content {
-    padding: 20px 18px 16px;
+    padding: 16px 14px 12px;
+    max-height: min(92vh, 92dvh);
+  }
+  .help-modal-content {
+    max-height: min(92vh, 92dvh);
   }
   .modal-content {
-    padding: 20px 20px 20px;
+    padding: 20px 16px;
   }
   .help-modal-body {
     padding: 16px 18px;
@@ -234,6 +340,20 @@
 
   .params-grid {
     max-height: 280px;
+  }
+
+  #toast-container {
+    top: 8px;
+    right: 8px;
+    left: 8px;
+    align-items: stretch;
+  }
+  .toast {
+    max-width: none;
+  }
+
+  .input-footer {
+    display: none;
   }
 }
 

@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <meta name="theme-color" content="#0a0e17" />
   <title>Nehchat Agent</title>
 
@@ -516,6 +516,7 @@
           <span class="logo-icon">✦</span>
           <span class="logo-text">存档信息</span>
         </div>
+        <button id="sidebar-close" class="icon-btn sidebar-close-btn" title="关闭侧栏">✕</button>
       </div>
 
       <div class="sidebar-body">
@@ -625,11 +626,14 @@
       <!-- === Slot Grid View === -->
       <div id="slot-view">
         <header id="slot-header">
-          <button id="catalog-btn-slot" class="help-btn-top" title="模型配置">⚙ 模型配置</button>
-          <button id="theme-btn-slot" class="help-btn-top" title="主题">🎨 主题</button>
-          <button id="help-btn-slot" class="help-btn-top" title="帮助">❓ 帮助</button>
-          <button id="import-backup-slot-btn" class="help-btn-top" title="导入存档备份">📤 导入备份</button>
-          <button id="logout-btn-slot" class="help-btn-top" title="注销登录">🚪 注销</button>
+          <div class="slot-header-toolbar">
+            <button id="catalog-btn-slot" class="help-btn-top" title="模型配置">⚙ <span class="toolbar-label">模型配置</span></button>
+            <button id="theme-btn-slot" class="help-btn-top" title="主题">🎨 <span class="toolbar-label">主题</span></button>
+            <button id="help-btn-slot" class="help-btn-top" title="帮助">❓ <span class="toolbar-label">帮助</span></button>
+            <button id="import-backup-slot-btn" class="help-btn-top" title="导入存档备份">📤 <span class="toolbar-label">导入备份</span></button>
+            <button id="admin-btn-slot" class="help-btn-top admin-only hidden" title="用户管理">👥 <span class="toolbar-label">用户</span></button>
+            <button id="logout-btn-slot" class="help-btn-top" title="注销登录">🚪 <span class="toolbar-label">注销</span></button>
+          </div>
           <div class="slot-header-content">
             <div class="slot-header-icon">✦</div>
             <h1 class="slot-header-title">Nehchat Agent</h1>
@@ -653,8 +657,9 @@
             <button id="catalog-btn-chat" class="icon-btn header-action-btn" title="模型配置">⚙</button>
             <button id="theme-btn-chat" class="icon-btn header-action-btn" title="主题">🎨</button>
             <button id="help-btn-chat" class="icon-btn header-action-btn help-header-btn" title="帮助">❓</button>
+            <button id="admin-btn-chat" class="icon-btn header-action-btn admin-only hidden" title="用户管理">👥</button>
             <button id="logout-btn-chat" class="icon-btn header-action-btn" title="注销登录">🚪</button>
-            <button id="back-to-slots-header-btn" class="icon-btn header-action-btn" title="返回存档选择">☰</button>
+            <button id="back-to-slots-header-btn" class="icon-btn header-action-btn" title="返回存档选择">←</button>
           </div>
         </header>
 
@@ -669,8 +674,8 @@
         <!-- Input area -->
         <div id="input-area">
           <div class="input-wrapper">
-            <textarea id="message-input" rows="1" placeholder="输入消息… (Enter 发送, Shift+Enter 换行)"></textarea>
-            <button id="continue-btn" class="continue-btn" title="继续回复：无需输入消息，让 AI 继续对话（双模型时两个模型都会回复）">⏩ 继续</button>
+            <textarea id="message-input" rows="1" placeholder="输入消息…"></textarea>
+            <button id="continue-btn" class="continue-btn" title="继续回复：无需输入消息，让 AI 继续对话（双模型时两个模型都会回复）">⏩ <span class="continue-label">继续</span></button>
             <button id="send-btn" class="send-btn" title="发送">
               <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <line x1="22" y1="2" x2="11" y2="13"></line>
@@ -700,6 +705,48 @@
           <div id="catalog-provider-list"></div>
         </aside>
         <div class="catalog-main" id="catalog-form-wrap"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Admin users Modal -->
+  <div id="admin-modal" class="modal-overlay hidden">
+    <div class="modal-content admin-modal-content">
+      <div class="help-modal-header">
+        <div class="help-modal-icon">👥</div>
+        <div class="help-modal-title">用户管理</div>
+        <button class="help-close-btn" id="admin-close-btn" title="关闭">✕</button>
+      </div>
+      <div class="admin-modal-body">
+        <section class="admin-create-section">
+          <h3 class="admin-section-title">新建账号</h3>
+          <form id="admin-create-form" class="admin-create-form" autocomplete="off">
+            <input id="admin-new-username" class="create-input" type="text" maxlength="32" placeholder="用户名" autocomplete="off" />
+            <input id="admin-new-password" class="create-input" type="password" maxlength="128" placeholder="密码（至少 6 位）" autocomplete="new-password" />
+            <input id="admin-new-password2" class="create-input" type="password" maxlength="128" placeholder="确认密码" autocomplete="new-password" />
+            <label class="admin-check">
+              <input type="checkbox" id="admin-new-is-admin" />
+              设为管理员
+            </label>
+            <button type="submit" class="auth-btn admin-create-btn" id="admin-create-submit">创建</button>
+          </form>
+        </section>
+        <section class="admin-reset-section hidden" id="admin-reset-panel">
+          <h3 class="admin-section-title">重置密码</h3>
+          <p class="admin-reset-hint" id="admin-reset-hint"></p>
+          <form id="admin-reset-form" class="admin-create-form" autocomplete="off">
+            <input id="admin-reset-password" class="create-input" type="password" maxlength="128" placeholder="新密码（至少 6 位）" autocomplete="new-password" />
+            <input id="admin-reset-password2" class="create-input" type="password" maxlength="128" placeholder="确认新密码" autocomplete="new-password" />
+            <div class="admin-reset-actions">
+              <button type="button" class="modal-btn modal-btn-cancel" id="admin-reset-cancel">取消</button>
+              <button type="submit" class="auth-btn admin-create-btn" id="admin-reset-submit">保存</button>
+            </div>
+          </form>
+        </section>
+        <section class="admin-list-section">
+          <h3 class="admin-section-title">账号列表</h3>
+          <div id="admin-user-list" class="admin-user-list"></div>
+        </section>
       </div>
     </div>
   </div>

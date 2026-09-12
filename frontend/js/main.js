@@ -40,6 +40,7 @@ import { initBackground, refreshBackgroundPanel } from "./background.js";
 
 // ── 账号 ──
 import { initAuth, bindAuthUi } from "./auth.js";
+import { bindAdminUi, closeAdminModal } from "./admin.js";
 
 // ── 初始化 ──
 
@@ -65,6 +66,7 @@ function setupEventListeners() {
   // 侧边栏开关
   $("#sidebar-toggle").addEventListener("click", openSidebar);
   $("#sidebar-overlay").addEventListener("click", closeSidebar);
+  $("#sidebar-close")?.addEventListener("click", closeSidebar);
 
   // 导航
   $("#back-to-slots-btn").addEventListener("click", backToSlots);
@@ -90,6 +92,7 @@ function setupEventListeners() {
   $("#help-got-it").addEventListener("click", closeHelpModal);
 
   bindCatalogUi();
+  bindAdminUi();
 
   // 主题（宫格页与聊天页右上角按钮 + 弹层关闭）
   const openThemeWithBg = () => {
@@ -144,6 +147,12 @@ function setupEventListeners() {
     const catalogModal = document.getElementById("catalog-modal");
     if (catalogModal && !catalogModal.classList.contains("hidden")) {
       closeCatalogModal();
+      return;
+    }
+
+    const adminModal = document.getElementById("admin-modal");
+    if (adminModal && !adminModal.classList.contains("hidden")) {
+      closeAdminModal();
       return;
     }
 

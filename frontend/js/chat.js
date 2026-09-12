@@ -353,12 +353,13 @@ export async function sendMessage(opts = {}) {
   await refreshSlotAfterStream({
     gotDone, errorHandled, aborted,
     errorText: streamError, retryText: streamRetry,
+    reloadHistory: !!fromId,
   });
   document.getElementById("message-input")?.focus();
 }
 
 async function refreshSlotAfterStream({
-  gotDone, errorHandled, aborted, errorText = null, retryText = null,
+  gotDone, errorHandled, aborted, errorText = null, retryText = null, reloadHistory = false,
 }) {
   if (state.currentSlotIndex !== null) {
     try {
@@ -366,9 +367,12 @@ async function refreshSlotAfterStream({
       state.dualEnabled = state.currentSlotData.dual_enabled || false;
       state.responseMode = state.currentSlotData.response_mode || "both";
       state.firstModel = state.currentSlotData.first_model || "model1";
-      if (!gotDone) {
+      // 新消息取消时 DOM 已回滚，不能用尚未删干净的服务端快照把用户消息画回来
+      if (!gotDone && (reloadHistory || (!errorHandled && !state.streamCancelled && !aborted))) {
         renderMessages(state.currentSlotData.history || []);
-        if (errorText) addErrorMessage(errorText, retryText);
+      }
+      if (!gotDone && errorText && !state.streamCancelled) {
+        addErrorMessage(errorText, retryText);
       }
       updateSidebarInfo();
     } catch (_) { /* 静默失败 */ }

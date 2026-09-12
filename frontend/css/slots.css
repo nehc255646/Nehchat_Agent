@@ -3,6 +3,7 @@
   flex: 1;
   display: flex;
   flex-direction: column;
+  min-height: 0;
   overflow: hidden;
 }
 
@@ -11,6 +12,7 @@
   position: relative;
   text-align: center;
   padding: 44px 20px 36px;
+  flex-shrink: 0;
 }
 
 .slot-header-content {
